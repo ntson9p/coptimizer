@@ -256,7 +256,8 @@ func TestComponentCleanupRunsDISM(t *testing.T) {
 		t.Errorf("outcome %+v, progress %v, logs %q", o, pct, logs)
 	}
 	c := m.run.Calls()[0]
-	if c.Dir != `C:\Windows\System32` || c.Timeout < time.Hour {
+	// No time limit: DISM's cleanup can't be stopped safely once started.
+	if c.Dir != `C:\Windows\System32` || c.Timeout != 0 || p.Stoppable {
 		t.Errorf("command = %+v", c)
 	}
 	exit = 3010
@@ -291,5 +292,185 @@ func TestNoActionNoPlan(t *testing.T) {
 	_, err := actions.Prepare(context.Background(), m.deps, rules.Report{}, rules.Finding{ID: "personal.downloads"})
 	if !errors.Is(err, actions.ErrNoAction) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+type brokenBin struct{}
+
+func (brokenBin) RecycleBin(string) (int64, int64, error) { return 1 << 20, 1, nil }
+func (brokenBin) EmptyRecycleBin(string) error            { return errors.New("the shell said no") }
+
+type brokenPrograms struct{}
+
+func (brokenPrograms) Running() ([]string, error) { return nil, errors.New("no snapshot") }
+
+func TestFailuresAreReportedNotHidden(t *testing.T) {
+	m := newMachine(t, true)
+	m.file(`C:\$Recycle.Bin\S-1-5-21-1\$R1.zip`, 500*mb, old)
+	m.bin.bytes, m.bin.items = 450*mb, 3
+	p := m.prepare("personal.recycle-bin")
+
+	m.deps.Mutator = nil
+	if o, _, _ := m.execute(p, false); o.State != actions.Failed {
+		t.Errorf("without a mutator: %+v", o)
+	}
+	m.deps.Mutator = brokenBin{}
+	if o, _, _ := m.execute(p, false); o.State != actions.Failed || !strings.Contains(o.Error, "the shell said no") {
+		t.Errorf("a failing shell: %+v", o)
+	}
+
+	m.file(`C:\Windows\WinSxS\amd64_x\big.dll`, 2<<30, old)
+	dism := m.prepare("system.component-store")
+	m.run.Respond = func(context.Context, execx.Cmd) (execx.Result, error) {
+		return execx.Result{}, errors.New("cannot start")
+	}
+	if o, _, _ := m.execute(dism, false); o.State != actions.Failed || !strings.Contains(o.Error, "cannot start") {
+		t.Errorf("a tool that can't start: %+v", o)
+	}
+
+	m.file(local+`\Google\Chrome\User Data\Default\Cache\Cache_Data\f`, 300*mb, old)
+	chrome := m.prepare("browsers.chrome-cache")
+	m.deps.Programs = brokenPrograms{}
+	if _, _, err := actions.Check(m.deps, chrome); err == nil {
+		t.Error("Check worked without knowing which programs run")
+	}
+	res, _ := scan.Run(context.Background(), m.fs, scan.Options{Roots: []string{`C:\`}})
+	rep := rules.Evaluate(res, m.deps.Env, rules.Options{})
+	f, _ := rep.Find("browsers.chrome-cache")
+	if _, err := actions.Prepare(context.Background(), m.deps, rep, f); err == nil {
+		t.Error("a preview was made without knowing which programs run")
+	}
+}
+
+func TestTheRecycleBinMustNotHaveChangedSinceThePreview(t *testing.T) {
+	m := newMachine(t, false)
+	m.file(`C:\$Recycle.Bin\S-1-5-21-1\$R1.zip`, 500*mb, old)
+	m.bin.bytes, m.bin.items = 450*mb, 3
+	p := m.prepare("personal.recycle-bin")
+	if p.Stoppable {
+		t.Error("emptying the Recycle Bin can't be stopped half-way")
+	}
+
+	// Something was deleted to the bin after the preview: emptying it now
+	// would destroy what the preview never showed.
+	m.bin.bytes, m.bin.items = 460*mb, 4
+	if o, _, _ := m.execute(p, false); o.State != actions.Failed || !strings.Contains(o.Error, "changed since the preview") || len(m.bin.emptied) != 0 {
+		t.Errorf("a bin that grew: %+v, emptied %v", o, m.bin.emptied)
+	}
+	// Emptied by someone else meanwhile: nothing to do.
+	m.bin.bytes, m.bin.items = 0, 0
+	if o, _, _ := m.execute(p, false); o.State != actions.Succeeded || o.Files != 0 || len(m.bin.emptied) != 0 {
+		t.Errorf("an empty bin: %+v, emptied %v", o, m.bin.emptied)
+	}
+}
+
+func TestDISMWaitsForTheDISMProbes(t *testing.T) {
+	m := newMachine(t, true)
+	m.file(`C:\Windows\WinSxS\amd64_x\big.dll`, 2<<30, old)
+	m.deps.DISM = execx.NewLock()
+	p := m.prepare("system.component-store")
+
+	m.deps.DISM.TryAcquire() // an analysis is running
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan actions.Outcome)
+	var logs []string
+	go func() {
+		done <- actions.Run(ctx, m.deps, p, false, func(actions.Progress) {}, func(l string) { logs = append(logs, l) })
+	}()
+	select {
+	case o := <-done:
+		t.Fatalf("DISM's cleanup didn't wait for the analysis: %+v", o)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	if o := <-done; o.State != actions.Cancelled || len(m.run.Calls()) != 0 || len(logs) != 1 || !strings.Contains(logs[0], "Waiting for DISM") {
+		t.Errorf("stopped while waiting: %+v, ran %d times, logs %q", o, len(m.run.Calls()), logs)
+	}
+
+	m.deps.DISM.Release() // the analysis finished
+	if o, _, _ := m.execute(p, false); o.State != actions.Succeeded || len(m.run.Calls()) != 1 {
+		t.Errorf("after the analysis: %+v", o)
+	}
+	if !m.deps.DISM.TryAcquire() {
+		t.Error("the cleanup kept the DISM lock")
+	}
+}
+
+func TestSingleFilesAreMeasuredAgainOnTheirOwn(t *testing.T) {
+	m := newMachine(t, true)
+	m.file(`C:\Windows\MEMORY.DMP`, 900*mb, old)
+	m.file(`C:\Windows\Minidump\102426-1.dmp`, 1*mb, old)
+	p := m.prepare("system.memory-dumps")
+	// Not C:\Windows as a whole: measured alone, it would count the files it
+	// shares with Program Files through hard links twice.
+	want := []string{`C:\Windows\MEMORY.DMP`, `C:\Windows\Minidump`}
+	got := p.Rescan()
+	slices.Sort(got)
+	if !slices.Equal(got, want) || !p.Stoppable || p.Files != 2 {
+		t.Errorf("plan: rescan %v, stoppable %v, files %d", got, p.Stoppable, p.Files)
+	}
+	if o, _, _ := m.execute(p, false); o.State != actions.Succeeded || m.fs.Exists(`C:\Windows\MEMORY.DMP`) {
+		t.Errorf("outcome = %+v", o)
+	}
+}
+
+type unreadableBin struct{}
+
+func (unreadableBin) RecycleBin(string) (int64, int64, error) { return 0, 0, errors.New("no answer") }
+func (unreadableBin) EmptyRecycleBin(string) error            { return nil }
+
+func TestEveryFailureEndsAPlanOrARun(t *testing.T) {
+	m := newMachine(t, true)
+	m.file(local+`\npm-cache\_cacache\a`, 300*mb, old)
+	m.file(`C:\$Recycle.Bin\S-1-5-21-1\$R1.zip`, 500*mb, old)
+	res, _ := scan.Run(context.Background(), m.fs, scan.Options{Roots: []string{`C:\`}})
+	rep := rules.Evaluate(res, m.deps.Env, rules.Options{})
+	npm, _ := rep.Find("dev.npm-cache")
+	bin, _ := rep.Find("personal.recycle-bin")
+
+	if _, err := actions.Prepare(context.Background(), m.deps, rep, rules.Finding{ID: "x", Action: &rules.Action{Kind: "format-c"}}); err == nil {
+		t.Error("a preview of an unknown action")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := actions.Prepare(cancelled, m.deps, rep, npm); err == nil {
+		t.Error("a preview whose dry run was stopped")
+	}
+	unread := m.deps
+	unread.RecycleBin = unreadableBin{}
+	if _, err := actions.Prepare(context.Background(), unread, rep, bin); err == nil {
+		t.Error("a preview of a Recycle Bin that couldn't be read")
+	}
+
+	m.bin.bytes, m.bin.items = 450*mb, 3
+	p, err := actions.Prepare(context.Background(), m.deps, rep, bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := actions.Run(context.Background(), unread, p, false, func(actions.Progress) {}, func(string) {}); o.State != actions.Failed {
+		t.Errorf("emptying a Recycle Bin that couldn't be read again: %+v", o)
+	}
+
+	p, err = actions.Prepare(context.Background(), m.deps, rep, npm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noPolicy := m.deps
+	noPolicy.Policy = nil
+	if o := actions.Run(context.Background(), noPolicy, p, false, func(actions.Progress) {}, func(string) {}); o.State != actions.Failed || !m.fs.Exists(local+`\npm-cache\_cacache\a`) {
+		t.Errorf("a deletion without a deny list: %+v", o)
+	}
+	if o := actions.Run(context.Background(), m.deps, &actions.Plan{Kind: "format-c"}, false, func(actions.Progress) {}, func(string) {}); o.State != actions.Failed {
+		t.Errorf("an unknown action: %+v", o)
+	}
+}
+
+func TestAToolStoppedWhileRunning(t *testing.T) {
+	m := newMachine(t, true)
+	m.file(`C:\Windows\WinSxS\amd64_x\big.dll`, 2<<30, old)
+	p := m.prepare("system.component-store")
+	m.run.Respond = func(context.Context, execx.Cmd) (execx.Result, error) { return execx.Result{}, context.Canceled }
+	if o, _, _ := m.execute(p, false); o.State != actions.Cancelled {
+		t.Errorf("outcome = %+v", o)
 	}
 }

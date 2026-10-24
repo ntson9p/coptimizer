@@ -28,29 +28,48 @@ type Cleaner struct{}
 
 // Open implements fsx.Cleaner.
 func (Cleaner) Open(path string) (fsx.Tree, error) {
+	root, final, err := openRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	return &tree{root: root, path: final}, nil
+}
+
+// OpenRoot opens the folder at path as an os.Root, for code that writes, as
+// Administrator, in a folder an unprivileged user might reach: COptimizer's
+// own data folder. It refuses a folder that isn't on a local fixed drive or
+// that Windows reaches through a junction or link.
+func OpenRoot(path string) (*os.Root, error) {
+	root, _, err := openRoot(path)
+	return root, err
+}
+
+// openRoot opens the folder at path and returns it with the path Windows
+// itself resolved, which must be path.
+func openRoot(path string) (*os.Root, string, error) {
 	n, err := safety.Normalize(path)
 	if err != nil {
-		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+		return nil, "", &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	if windows.GetDriveType(windows.StringToUTF16Ptr(n[:3])) != windows.DRIVE_FIXED {
-		return nil, &fs.PathError{Op: "open", Path: n, Err: fsx.ErrNotLocal}
+		return nil, "", &fs.PathError{Op: "open", Path: n, Err: fsx.ErrNotLocal}
 	}
 	root, err := os.OpenRoot(n)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	// Ask Windows where the folder it opened really is. A junction or link
 	// on the way, a short (8.3) name or a SUBST drive all give another path.
 	final, err := rootPath(root)
 	if err != nil {
 		root.Close()
-		return nil, &fs.PathError{Op: "open", Path: n, Err: err}
+		return nil, "", &fs.PathError{Op: "open", Path: n, Err: err}
 	}
 	if !strings.EqualFold(final, n) {
 		root.Close()
-		return nil, &fs.PathError{Op: "open", Path: n, Err: fsx.ErrLink}
+		return nil, "", &fs.PathError{Op: "open", Path: n, Err: fsx.ErrLink}
 	}
-	return &tree{root: root, path: final}, nil
+	return root, final, nil
 }
 
 // rootPath returns the real, normalized path of the folder root has open.

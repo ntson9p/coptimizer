@@ -44,7 +44,11 @@ function onEvent(type, data) {
   const { scan, status } = store.state;
   switch (type) {
     case 'hello':
+      // A new or renewed connection: catch up on what changed meanwhile.
       store.set({ status: data, scan: data.lastScan ?? scan });
+      Promise.all([api.jobs(), api.system()]).then(([jobs, system]) => {
+        store.set({ jobs: Object.fromEntries(jobs.map((j) => [j.id, j])), system: system.probes });
+      }, () => {});
       break;
     case 'scan.started':
       store.set({ scan: data, progress: data.progress });

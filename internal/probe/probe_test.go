@@ -267,3 +267,25 @@ func TestKnownFolders(t *testing.T) {
 		t.Errorf("expand = %q", got)
 	}
 }
+
+// TestDISMProbesWaitForADISMCleanup holds the DISM lock, as a cleanup running
+// DISM does: the analysis waits instead of starting a second DISM.
+func TestDISMProbesWaitForADISMCleanup(t *testing.T) {
+	analyze := fixture(t, "dism-analyze.txt")
+	d, runner := dismDeps(func(context.Context, execx.Cmd) (execx.Result, error) {
+		return execx.Result{Stdout: analyze}, nil
+	})
+	d.DISM = execx.NewLock()
+	d.DISM.TryAcquire()
+	m := NewManager(d, nil)
+	defer m.Close()
+	if err := m.Run("componentStore"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if r := find(m.Results(), "componentStore"); r.State != Running || len(runner.Calls()) != 0 {
+		t.Fatalf("while the cleanup holds DISM: %+v, %d runs", r, len(runner.Calls()))
+	}
+	d.DISM.Release()
+	waitFor(t, func() bool { return find(m.Results(), "componentStore").State == OK })
+}

@@ -58,6 +58,36 @@ func (f *Fake) Calls() []Cmd {
 	return append([]Cmd(nil), f.calls...)
 }
 
+// Lock lets one user at a time run a tool that refuses to run twice at once,
+// like DISM. Unlike a mutex, waiting for it can be given up.
+type Lock chan struct{}
+
+// NewLock returns an unlocked Lock.
+func NewLock() Lock { return make(Lock, 1) }
+
+// Acquire waits until the lock is free and takes it, or returns ctx's error.
+func (l Lock) Acquire(ctx context.Context) error {
+	select {
+	case l <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// TryAcquire takes the lock if it is free, and reports whether it did.
+func (l Lock) TryAcquire() bool {
+	select {
+	case l <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// Release frees the lock.
+func (l Lock) Release() { <-l }
+
 // maxLine is the longest line passed to Cmd.Output; longer ones are cut.
 const maxLine = 4096
 

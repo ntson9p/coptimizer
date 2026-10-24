@@ -17,12 +17,25 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: Test
+      - name: Test, with coverage minimums
         shell: pwsh
-        run: ./scripts/test.ps1
+        run: ./scripts/test.ps1 -Cover
       - name: Build
         shell: pwsh
         run: ./scripts/build.ps1
+
+  race:
+    # Go's race detector needs a C compiler (cgo); GitHub's Windows runners
+    # come with one, unlike most development PCs.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test with the race detector
+        shell: pwsh
+        run: ./scripts/test.ps1 -Race
 
   destructive:
     # Real cleanups by the real exe, with Administrator rights, on this

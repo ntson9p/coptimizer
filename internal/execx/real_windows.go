@@ -24,7 +24,9 @@ type Real struct{}
 
 // Run starts c suspended, puts it in a job object that ends with the run, and
 // only then lets it go. When the time limit passes or ctx ends, the whole job
-// is stopped: the program and anything it started.
+// is stopped: the program and anything it started. The program gets no
+// console: Ctrl+C typed in COptimizer's window must not reach a tool like
+// DISM, which shouldn't be interrupted.
 func (Real) Run(ctx context.Context, c Cmd) (Result, error) {
 	safety.GuardRun(c.Path)
 	if !filepath.IsAbs(c.Path) {
@@ -41,11 +43,7 @@ func (Real) Run(ctx context.Context, c Cmd) (Result, error) {
 	}
 	defer windows.CloseHandle(job) // ends anything still running in the job
 
-	cmd := exec.CommandContext(ctx, c.Path, c.Args...)
-	cmd.Dir = c.Dir
-	if cmd.Dir == "" {
-		cmd.Dir = filepath.Dir(c.Path)
-	}
+	cmd := command(ctx, c, job)
 	var stdout, stderr capped
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	var out *lines
@@ -54,15 +52,15 @@ func (Real) Run(ctx context.Context, c Cmd) (Result, error) {
 		cmd.Stdout = io.MultiWriter(&stdout, out.stream())
 		cmd.Stderr = io.MultiWriter(&stderr, out.stream())
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
-	cmd.Cancel = func() error { return windows.TerminateJobObject(job, 1) }
-	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Start(); err != nil {
 		return Result{}, err
 	}
-	if err := enter(job, cmd.Process.Pid); err != nil {
+	if err := enter(ctx, job, cmd.Process.Pid); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Result{}, ctxErr
+		}
 		return Result{}, err
 	}
 	err = cmd.Wait()
@@ -73,14 +71,31 @@ func (Real) Run(ctx context.Context, c Cmd) (Result, error) {
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
+	if err == nil {
+		return res, nil // it finished on its own, even if ctx ended just after
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return res, ctxErr
 	}
 	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) {
+	if !errors.As(err, &exitErr) {
 		return res, err
 	}
 	return res, nil
+}
+
+// command prepares c to start suspended, without a console, in its own
+// folder (or c.Dir), and to be stopped by ending job.
+func command(ctx context.Context, c Cmd, job windows.Handle) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, c.Path, c.Args...)
+	cmd.Dir = c.Dir
+	if cmd.Dir == "" {
+		cmd.Dir = filepath.Dir(c.Path)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED | windows.CREATE_NO_WINDOW}
+	cmd.Cancel = func() error { return windows.TerminateJobObject(job, 1) }
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
 }
 
 // newJob creates a job object whose processes all end when its last handle
@@ -102,13 +117,20 @@ func newJob() (windows.Handle, error) {
 
 // enter puts the suspended process pid into job, then resumes it. Because it
 // was suspended, it couldn't start other processes outside the job meanwhile.
-func enter(job windows.Handle, pid int) error {
+// If ctx ended meanwhile, the process is ended instead of resumed: a stop
+// that came before the job held it would otherwise let it run until the wait
+// delay ran out.
+func enter(ctx context.Context, job windows.Handle, pid int) error {
 	p, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(pid))
 	if err != nil {
 		return err
 	}
 	defer windows.CloseHandle(p)
 	if err := windows.AssignProcessToJobObject(job, p); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		windows.TerminateJobObject(job, 1)
 		return err
 	}
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)

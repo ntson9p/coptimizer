@@ -63,7 +63,8 @@ function renderSettings(card, status) {
     onchange: async () => {
       box.disabled = true;
       try {
-        await api.setConfig({ simulate: box.checked });
+        const config = await api.setConfig({ simulate: box.checked });
+        store.set({ status: { ...store.state.status, simulate: config.simulate } });
       } catch (e) {
         box.checked = !box.checked;
         alert(t('error.generic', { message: e.message }));
@@ -100,7 +101,7 @@ function renderJobs(card, jobs, live) {
     if (j.state === 'queued' || j.state === 'running') {
       const el = { bar: bar(0, 'progress'), facts };
       li.append(h('div', { class: 'progress-row' }, el.bar,
-        j.long && !j.simulated ? null : h('button', { type: 'button', class: 'small', onclick: () => api.cancelJob(j.id).catch(() => {}) }, t('cleanup.stop'))));
+        j.stoppable ? h('button', { type: 'button', class: 'small', onclick: () => api.cancelJob(j.id).catch(() => {}) }, t('cleanup.stop')) : null));
       live.set(j.id, el);
     } else {
       facts.textContent = outcomeLine(j);

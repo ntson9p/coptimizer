@@ -251,3 +251,68 @@ func TestCleanerRefusesFilesAndMissingFolders(t *testing.T) {
 		t.Errorf("missing folder: %v", err)
 	}
 }
+
+func TestCleanerRefusesDrivesThatArentLocal(t *testing.T) {
+	letter := ""
+	for c := 'Z'; c >= 'D'; c-- {
+		if _, err := os.Stat(string(c) + `:\`); err != nil {
+			letter = string(c)
+			break
+		}
+	}
+	if letter == "" {
+		t.Skip("every drive letter is in use")
+	}
+	if _, err := (winfs.Cleaner{}).Open(letter + `:\Temp`); !errors.Is(err, fsx.ErrNotLocal) {
+		t.Errorf("Open on drive %s: = %v; want ErrNotLocal", letter, err)
+	}
+}
+
+// TestALongFolderCanBeCleaned opens a folder whose path is longer than 260
+// characters, which Windows only reports through a larger buffer.
+func TestALongFolderCanBeCleaned(t *testing.T) {
+	sb := sandbox.New(t)
+	deep := strings.Repeat(`a-rather-long-folder-name\`, 12) + "cache"
+	sb.WriteFile(deep+`\x.tmp`, []byte("x"))
+	if len(sb.Path(deep)) <= 260 {
+		t.Fatalf("the path is only %d characters", len(sb.Path(deep)))
+	}
+	tree, err := winfs.Cleaner{}.Open(sb.Path(deep))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(tree.Path(), sb.Path(deep)) {
+		t.Errorf("Path = %q", tree.Path())
+	}
+	if err := tree.Remove(""); err == nil {
+		t.Error("removed the open folder through its own tree")
+	}
+	tree.Close()
+	if res := cleanRun(t, clean.Spec{Folders: []string{sb.Path(deep)}}, false); res.Files != 1 || exists(t, sb.Path(deep+`\x.tmp`)) {
+		t.Errorf("result = %+v", res.Locations[0])
+	}
+}
+
+func TestCleanerRefusesPathsThatArentPlain(t *testing.T) {
+	for _, p := range []string{`relative\path`, `C:\Temp\..\Windows`, `\server\share`} {
+		if _, err := (winfs.Cleaner{}).Open(p); err == nil {
+			t.Errorf("Open(%q) worked", p)
+		}
+	}
+}
+
+// TestATreeAtADriveRoot opens the sandbox's drive root, only to list the
+// sandbox through it: names join onto a root that already ends in `\`.
+func TestATreeAtADriveRoot(t *testing.T) {
+	sb := sandbox.New(t)
+	sb.WriteFile("x.txt", []byte("x"))
+	tree, err := winfs.Cleaner{}.Open(sb.Root[:3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tree.Close()
+	entries, err := tree.List(sb.Root[3:])
+	if err != nil || len(entries) != 1 || entries[0].Name != "x.txt" {
+		t.Errorf("entries = %v, %v", entries, err)
+	}
+}

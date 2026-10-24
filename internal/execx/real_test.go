@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -54,6 +55,11 @@ func helper(mode string, args []string) {
 		chunk := strings.Repeat("x", 1<<20)
 		for range 10 {
 			fmt.Print(chunk)
+		}
+	case "console":
+		// Which processes share this process's console.
+		for _, id := range consoleProcesses() {
+			fmt.Println(id)
 		}
 	case "progress":
 		// Like DISM: a progress bar redrawn with carriage returns.
@@ -151,6 +157,25 @@ func TestOutputArrivesLineByLine(t *testing.T) {
 	}
 }
 
+// TestProgramsDontShareOurConsole checks that a program run through execx
+// isn't attached to COptimizer's console, so Ctrl+C typed there can't reach
+// it. Windows gives it a console of its own, without a window.
+func TestProgramsDontShareOurConsole(t *testing.T) {
+	if len(consoleProcesses()) == 0 {
+		t.Skip("this test runs without a console, so there is none to share")
+	}
+	res, err := execx.Real{}.Run(context.Background(), helperCmd(t, "console"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := strconv.Itoa(os.Getpid())
+	for _, id := range strings.Fields(string(res.Stdout)) {
+		if id == me {
+			t.Fatalf("the program shares this test's console: %q", res.Stdout)
+		}
+	}
+}
+
 func TestOnlyRegisteredProgramsRun(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "SAFETY FUSE") {
@@ -179,4 +204,17 @@ func exited(pid uint32, wait time.Duration) bool {
 	defer windows.CloseHandle(h)
 	ev, err := windows.WaitForSingleObject(h, uint32(wait.Milliseconds()))
 	return err == nil && ev == windows.WAIT_OBJECT_0
+}
+
+var getConsoleProcessList = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleProcessList")
+
+// consoleProcesses returns the IDs of the processes attached to this
+// process's console, or none if it has no console. It only reads.
+func consoleProcesses() []uint32 {
+	ids := make([]uint32, 64)
+	n, _, _ := getConsoleProcessList.Call(uintptr(unsafe.Pointer(&ids[0])), uintptr(len(ids)))
+	if n == 0 || int(n) > len(ids) {
+		return nil
+	}
+	return ids[:n]
 }

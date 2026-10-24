@@ -50,15 +50,17 @@ type jobs struct {
 	order    []string // oldest first
 	queue    []*job
 	running  *job
+	closing  bool          // shutting down: no new cleanups
 	done     chan struct{} // closed when the runner has stopped
 }
 
 type planEntry struct {
-	id      string
-	plan    *actions.Plan
-	scanID  string
-	expires time.Time
-	used    bool
+	id       string
+	plan     *actions.Plan
+	scanID   string
+	simulate bool // the preview was a simulation's: so must the run be
+	expires  time.Time
+	used     bool
 }
 
 type job struct {
@@ -139,9 +141,9 @@ func (m *jobs) prepare(ctx context.Context, ruleID string) (planView, error) {
 		}
 	}
 	m.nextPlan++
-	e := &planEntry{id: fmt.Sprintf("p%d", m.nextPlan), plan: p, scanID: scanID, expires: now.Add(planLifetime)}
+	e := &planEntry{id: fmt.Sprintf("p%d", m.nextPlan), plan: p, scanID: scanID, simulate: m.simulate, expires: now.Add(planLifetime)}
 	m.plans[e.id] = e
-	return planView{ID: e.id, ScanID: scanID, Expires: e.expires, Simulate: m.simulate, Plan: p}, nil
+	return planView{ID: e.id, ScanID: scanID, Expires: e.expires, Simulate: e.simulate, Plan: p}, nil
 }
 
 // start queues the cleanup a preview approved.
@@ -152,6 +154,9 @@ func (m *jobs) start(planID string) (jobView, error) {
 	m.mu.Lock()
 	e := m.plans[planID]
 	switch {
+	case m.closing:
+		m.mu.Unlock()
+		return jobView{}, errClosing()
 	case e == nil || m.now().After(e.expires):
 		m.mu.Unlock()
 		return jobView{}, &apiError{Status: 409, Code: "plan_expired", Message: "this preview has expired; preview the cleanup again"}
@@ -170,21 +175,32 @@ func (m *jobs) start(planID string) (jobView, error) {
 	}
 
 	m.mu.Lock()
-	if e.used { // confirmed twice at the same moment
+	switch {
+	case m.closing:
+		m.mu.Unlock()
+		return jobView{}, errClosing()
+	case e.used: // confirmed twice at the same moment
 		m.mu.Unlock()
 		return jobView{}, &apiError{Status: 409, Code: "plan_used", Message: "this preview has already been carried out"}
+	case e.simulate != m.simulate:
+		// The preview promised a simulation, or a real cleanup: what it
+		// showed is what runs, or nothing does.
+		m.mu.Unlock()
+		return jobView{}, &apiError{Status: 409, Code: "plan_stale", Message: "simulation mode changed since this preview; preview the cleanup again"}
 	}
 	e.used = true
 	m.nextJob++
-	j := &job{id: fmt.Sprintf("j%d", m.nextJob), plan: e.plan, scanID: e.scanID, state: "queued", simulate: m.simulate, queued: m.now()}
+	j := &job{id: fmt.Sprintf("j%d", m.nextJob), plan: e.plan, scanID: e.scanID, state: "queued", simulate: e.simulate, queued: m.now()}
 	m.byID[j.id] = j
 	m.order = append(m.order, j.id)
 	m.prune()
 	m.queue = append(m.queue, j)
 	v := j.view(false)
+	// Announced before the runner can pick it up, so that job.queued always
+	// comes before job.started.
+	m.hub.publish("job.queued", v, true)
 	m.mu.Unlock()
 
-	m.hub.publish("job.queued", v, true)
 	select {
 	case m.wake <- struct{}{}:
 	default:
@@ -203,6 +219,23 @@ func (m *jobs) prune() {
 		delete(m.byID, j.id)
 		m.order = m.order[1:]
 	}
+}
+
+func errClosing() error {
+	return &apiError{Status: 409, Code: "shutting_down", Message: "COptimizer is stopping"}
+}
+
+// beginShutdown stops new cleanups from starting. Unless force is set, it
+// refuses while a cleanup is queued or running: stopping COptimizer would
+// stop that cleanup too.
+func (m *jobs) beginShutdown(force bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !force && (m.running != nil || len(m.queue) > 0) {
+		return &apiError{Status: 409, Code: "busy", Message: "a cleanup is running; wait for it to finish first"}
+	}
+	m.closing = true
+	return nil
 }
 
 func blockedError(why string, running []string) error {
@@ -286,7 +319,7 @@ func (m *jobs) execute(ctx context.Context, j *job) {
 		freed = after - before
 	}
 	m.finish(j, o, freed)
-	if !j.simulate && len(p.Rescan()) > 0 && (o.Files > 0 || p.Kind != rules.Delete) {
+	if m.ctx.Err() == nil && !j.simulate && len(p.Rescan()) > 0 && (o.Files > 0 || p.Kind != rules.Delete) {
 		if err := m.scans.refresh(m.ctx, j.scanID, p.Rescan()); err != nil && !errors.Is(err, context.Canceled) {
 			m.logf("could not measure the cleaned folders again: %v", err)
 		}
@@ -349,10 +382,10 @@ func (m *jobs) cancel(id string) (jobView, error) {
 		j.state, j.finished = actions.Cancelled, m.now()
 		j.outcome = &actions.Outcome{State: actions.Cancelled}
 		v := j.view(false)
-		m.mu.Unlock()
 		m.hub.publish("job.finished", v, true)
+		m.mu.Unlock()
 		return v, nil
-	case j.state == "running" && j.plan.Long && !j.simulate:
+	case j.state == "running" && !j.plan.Stoppable && !j.simulate:
 		m.mu.Unlock()
 		return jobView{}, &apiError{Status: 409, Code: "not_cancellable", Message: "this cleanup can't be stopped safely once it has started"}
 	case j.state == "running":
@@ -393,8 +426,9 @@ func (m *jobs) list() []jobView {
 
 func (m *jobs) setSimulate(on bool) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.simulate = on
-	m.mu.Unlock()
+	// Under the lock, so that two changes at once are announced in order.
 	m.hub.publish("config.updated", configView{Simulate: on, Cleanups: m.available()}, true)
 }
 
@@ -418,6 +452,7 @@ type jobView struct {
 	State     string           `json:"state"`
 	Simulated bool             `json:"simulated"`
 	Long      bool             `json:"long,omitempty"`
+	Stoppable bool             `json:"stoppable"`
 	Estimate  int64            `json:"estimate"`
 	Unknown   bool             `json:"unknown,omitempty"`
 	Command   string           `json:"command,omitempty"`
@@ -435,7 +470,8 @@ type jobView struct {
 // which events leave out to stay small.
 func (j *job) view(full bool) jobView {
 	v := jobView{ID: j.id, RuleID: j.plan.Rule, Kind: j.plan.Kind, State: j.state, Simulated: j.simulate, Long: j.plan.Long,
-		Estimate: j.plan.Bytes, Unknown: j.plan.Unknown, Command: j.plan.Command, Queued: j.queued, Progress: j.progress,
+		Stoppable: j.plan.Stoppable || j.simulate,
+		Estimate:  j.plan.Bytes, Unknown: j.plan.Unknown, Command: j.plan.Command, Queued: j.queued, Progress: j.progress,
 		Freed: j.freed, Error: j.err}
 	if !j.started.IsZero() {
 		t := j.started

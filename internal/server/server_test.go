@@ -355,8 +355,8 @@ func TestEventStreamAndReplay(t *testing.T) {
 	}
 
 	r, done := open("")
-	if got := readEvents(t, r, "hello"); got[0] != "hello#" {
-		t.Fatalf("first event = %v; want hello without an ID", got)
+	if got := readEvents(t, r, "hello"); got[0] != "hello#0" {
+		t.Fatalf("first event = %v; want hello with ID 0, the point to resume from", got)
 	}
 	f.do("POST", "/api/scans", tok, `{"drives":["C:\\"]}`, nil)
 	got := readEvents(t, r, "scan.finished")
@@ -367,9 +367,29 @@ func TestEventStreamAndReplay(t *testing.T) {
 
 	// A page that saw event 1 gets event 2 again after reconnecting.
 	r, done = open("1")
-	defer done()
-	if got := readEvents(t, r, "scan.finished"); got[0] != "hello#" || got[1] != "scan.finished#2" {
+	if got := readEvents(t, r, "scan.finished"); got[0] != "hello#2" || got[1] != "scan.finished#2" {
 		t.Errorf("replay = %v", got)
+	}
+	done()
+
+	// A page that saw only a hello (ID 2) and lost its connection gets what
+	// happened meanwhile when it reconnects.
+	f.do("POST", "/api/scans", tok, `{"drives":["C:\\"]}`, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, data := f.do("GET", "/api/status", tok, "", nil)
+		if last := decode[map[string]any](t, data)["lastScan"].(map[string]any); last["state"] == "done" && last["id"] == "s2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second scan didn't finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r, done = open("2")
+	defer done()
+	if got := readEvents(t, r, "scan.finished"); got[0] != "hello#4" || got[1] != "scan.started#3" || got[2] != "scan.finished#4" {
+		t.Errorf("after a gap = %v", got)
 	}
 }
 

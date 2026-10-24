@@ -215,7 +215,7 @@ func (r *run) file(path string) Location {
 	defer tree.Close()
 	entries, err := tree.List("")
 	if err != nil {
-		refuse(&loc, ReasonError, err.Error())
+		refuse(&loc, reason(err), err.Error())
 		return loc
 	}
 	for _, e := range entries {

@@ -151,7 +151,8 @@ func serve(o options) int {
 			}
 			snapshots, history, where = s, store.OpenHistory(dir), dir
 		}
-		probes = &probe.Deps{Registry: probe.SystemRegistry{}, Stat: fileSize, Runner: execx.Real{},
+		dism := execx.NewLock() // DISM refuses to run twice at once: probes and cleanups take turns
+		probes = &probe.Deps{Registry: probe.SystemRegistry{}, Stat: fileSize, Runner: execx.Real{}, DISM: dism,
 			Elevated: sys.Elevated(), SystemRoot: env.Windows, SystemDrive: env.SystemDrive}
 		policy, err := safety.NewPolicy(safety.Places{SystemDrive: env.SystemDrive, Windows: env.Windows,
 			ProgramData: env.ProgramData, ProgramFiles: env.ProgramFiles, ProgramFilesX86: env.ProgramFilesX86, Users: env.Users,
@@ -160,7 +161,7 @@ func serve(o options) int {
 			log.Printf("cleanups are off: %v", err)
 		} else {
 			cleanups = &actions.Deps{Cleaner: winfs.Cleaner{}, Policy: policy, Programs: sysinfo.Real{}, RecycleBin: sysinfo.Real{},
-				Mutator: sysinfo.RealMutator{}, Runner: execx.Real{}, Elevated: sys.Elevated(), Env: env, Now: time.Now}
+				Mutator: sysinfo.RealMutator{}, Runner: execx.Real{}, DISM: dism, Elevated: sys.Elevated(), Env: env, Now: time.Now}
 		}
 	}
 
@@ -199,12 +200,32 @@ func serve(o options) int {
 			fmt.Println("Open the link above in your browser.")
 		}
 	}
-	go readConsole(srv, stop)
+	// Q in the console and Ctrl+C ask to quit; while a cleanup runs, the
+	// first request only warns (see quitGuard). The page's Quit has asked
+	// already when it closes done.
+	quit := make(chan struct{}, 1)
+	go readConsole(srv, func() {
+		select {
+		case quit <- struct{}{}:
+		default:
+		}
+	})
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
-	select {
-	case <-done:
-	case <-interrupt:
+	guard := &quitGuard{begin: srv.BeginShutdown, now: time.Now, within: 30 * time.Second}
+wait:
+	for {
+		select {
+		case <-done:
+			break wait
+		case <-interrupt:
+		case <-quit:
+		}
+		ok, warning := guard.request()
+		if ok {
+			break wait
+		}
+		fmt.Println(warning)
 	}
 
 	fmt.Println("Stopping COptimizer…")
@@ -258,15 +279,14 @@ func printBanner(port int, link string, elevated, demoMode, simulate bool, data 
 
 // readConsole handles the keys the banner mentions. When stdin isn't a
 // console (it ends at once), it just stops reading.
-func readConsole(srv *server.Server, stop func()) {
+func readConsole(srv *server.Server, quit func()) {
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		switch strings.ToLower(strings.TrimSpace(sc.Text())) {
 		case "l":
 			fmt.Println("New one-time link:", srv.NewLaunchLink())
 		case "q":
-			stop()
-			return
+			quit()
 		}
 	}
 }

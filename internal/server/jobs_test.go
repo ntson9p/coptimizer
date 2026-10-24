@@ -120,7 +120,12 @@ func TestACleanupFromPreviewToHistory(t *testing.T) {
 	oldFile(f, npm+`\index-v5\aa`, 200<<20)
 	oldFile(f, npm+`\content-v2\bb`, 100<<20)
 	tok := f.login()
-	f.scanAndWait(tok)
+	scanID := f.scanAndWait(tok)
+	unaccounted := func() any {
+		_, data := f.do("GET", "/api/scans/"+scanID, tok, "", nil)
+		return decode[map[string]any](t, data)["summary"].(map[string]any)["unaccounted"]
+	}
+	before := unaccounted()
 
 	req, _ := http.NewRequest("GET", f.ts.URL+"/api/events", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -172,6 +177,10 @@ func TestACleanupFromPreviewToHistory(t *testing.T) {
 	last := decode[map[string]any](t, data)["lastScan"].(map[string]any)
 	if last["updated"] == nil {
 		t.Errorf("the scan wasn't marked as measured again: %v", last)
+	}
+	// Space in use and space counted both shrank by what was freed.
+	if after := unaccounted(); after != before {
+		t.Errorf("not accounted for: %v before the cleanup, %v after", before, after)
 	}
 	_, data = f.do("GET", "/api/scans/"+last["id"].(string)+"/findings", tok, "", nil)
 	if rep := decode[findingsResponse](t, data); slices.Contains(ids(rep.Findings), "dev.npm-cache") {
@@ -360,6 +369,41 @@ func TestARunningDeleteCanBeCancelled(t *testing.T) {
 	f.do("DELETE", "/api/jobs/"+job["id"].(string), tok, "", nil)
 	if v := f.waitForJob(tok, job["id"].(string)); v["state"] != "cancelled" {
 		t.Errorf("state = %v", v["state"])
+	}
+}
+
+func TestAPreviewRunsAsItWasShown(t *testing.T) {
+	f := newFixture(t, withCleanups(&cleanups{}))
+	oldFile(f, npm+`\a`, 300<<20)
+	tok := f.login()
+	f.scanAndWait(tok)
+	f.do("PUT", "/api/config", tok, `{"simulate":true}`, nil)
+	_, plan := f.plan(tok, "dev.npm-cache")
+	// Simulation turned off in another tab: the preview that promised a
+	// simulation must not delete anything.
+	f.do("PUT", "/api/config", tok, `{"simulate":false}`, nil)
+	if code, v := f.startJob(tok, plan["id"].(string)); code != 409 || v["error"].(map[string]any)["code"] != "plan_stale" {
+		t.Errorf("confirming a simulation's preview after simulation was turned off: %d %v", code, v)
+	}
+	if !f.fs.Exists(npm + `\a`) {
+		t.Fatal("a preview made in simulation mode deleted a file")
+	}
+}
+
+func TestNoNewCleanupsOnceStopping(t *testing.T) {
+	f := newFixture(t, withCleanups(&cleanups{}))
+	oldFile(f, npm+`\a`, 300<<20)
+	tok := f.login()
+	f.scanAndWait(tok)
+	_, plan := f.plan(tok, "dev.npm-cache")
+	if resp, _ := f.do("POST", "/api/shutdown", tok, "", nil); resp.StatusCode != 200 {
+		t.Fatalf("quit: %d", resp.StatusCode)
+	}
+	if code, v := f.startJob(tok, plan["id"].(string)); code != 409 || v["error"].(map[string]any)["code"] != "shutting_down" {
+		t.Errorf("a cleanup confirmed while stopping: %d %v", code, v)
+	}
+	if !f.fs.Exists(npm + `\a`) {
+		t.Fatal("a cleanup ran while COptimizer was stopping")
 	}
 }
 

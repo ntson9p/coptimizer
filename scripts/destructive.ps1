@@ -9,12 +9,13 @@ the machine is disposable, which is a GitHub-hosted runner
 machine with the marker file C:\COPTIMIZER_DISPOSABLE_VM, and unless it has
 Administrator rights.
 
-It puts junk in the user's npm cache, temp folder and Recycle Bin, and a
-junction inside the npm cache that leads to a canary folder. Then it drives
-dist\coptimizer.exe -serve through its HTTP API, as the page does: scan C:,
-preview each cleanup, run it. It checks that the junk is gone, that the canary
-and recent temp files survive, that free space grew, and that the history
-records every cleanup. See docs/testing.md, section 5.
+It puts junk in the user's npm cache, temp folder and Recycle Bin, a junction
+inside the npm cache that leads to a canary folder, and an old temp file whose
+permissions forbid deleting it. Then it drives dist\coptimizer.exe -serve
+through its HTTP API, as the page does: scan C:, preview each cleanup, run it.
+It checks that the junk is gone; that the canary, recent temp files and the
+protected file survive; that free space grew; and that the history records
+every cleanup. See docs/testing.md, section 5.
 #>
 $ErrorActionPreference = 'Stop'
 
@@ -71,6 +72,20 @@ New-Item -ItemType Directory -Force $canaryDir | Out-Null
 [IO.File]::WriteAllText($canary, 'must survive the cleanup')
 New-Item -ItemType Junction -Path $link -Target $canaryDir | Out-Null
 
+# An old file in the temp folder that Windows forbids everyone to delete. With
+# Administrator rights COptimizer turns on SeBackupPrivilege to measure every
+# folder; that must not let it delete what permissions protect.
+$protectedDir = Join-Path $local 'Temp\coptimizer-protected'
+New-Junk $protectedDir 1 1 ([TimeSpan]::FromDays(3))
+$protected = Join-Path $protectedDir 'junk000.bin'
+$everyone = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
+$acl = Get-Acl -LiteralPath $protected
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($everyone, 'Delete', 'Deny')))
+Set-Acl -LiteralPath $protected -AclObject $acl
+$acl = Get-Acl -LiteralPath $protectedDir
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($everyone, 'DeleteSubdirectoriesAndFiles', 'Deny')))
+Set-Acl -LiteralPath $protectedDir -AclObject $acl
+
 Add-Type -AssemblyName Microsoft.VisualBasic
 $binDir = Join-Path $env:USERPROFILE 'coptimizer-bin-junk'
 New-Junk $binDir 15 10 ([TimeSpan]::Zero)                  # 150 MB: the Recycle Bin's finding starts at 100 MB
@@ -126,9 +141,14 @@ try {
             Start-Sleep -Seconds 1
             $job = Invoke-RestMethod "$base/api/jobs/$($job.id)" -Headers $h
         } while ($job.state -eq 'queued' -or $job.state -eq 'running')
-        # Other programs may hold some temp files open: partial is fine there.
+        # The protected file, and any temp file another program holds open,
+        # make the temp cleanup partial.
         if ($job.state -ne 'succeeded' -and -not ($job.state -eq 'partial' -and $case.Rule -eq 'personal.temp')) {
             Fail "$($case.Rule): $($job.state) $($job.error)"
+        }
+        if ($case.Rule -eq 'personal.temp') {
+            $denied = @($job.outcome.locations | ForEach-Object { $_.problems } | Where-Object { $_.path -eq $protected })
+            if ($denied.Count -ne 1 -or $denied[0].reason -ne 'denied') { Fail "the protected file wasn't reported as denied: $($denied | ConvertTo-Json -Compress)" }
         }
         Write-Host ("{0}: {1}, expected {2:N0} MB, freed {3:N0} MB, deleted {4:N0} files" -f `
                 $case.Rule, $job.state, ($plan.bytes / $mb), ($job.freed / $mb), $job.outcome.files)
@@ -140,6 +160,7 @@ try {
     if (@(Get-ChildItem -LiteralPath $tempJunk -Force -ErrorAction SilentlyContinue).Count -gt 0) { Fail 'old temp junk is still there' }
     if (-not (Test-Path -LiteralPath $tempFresh)) { Fail 'a recent temp file was deleted' }
     if (-not (Test-Path -LiteralPath $canary)) { Fail 'the canary behind the junction was deleted' }
+    if (-not (Test-Path -LiteralPath $protected)) { Fail 'a file whose permissions forbid deleting it was deleted' }
     if (-not (Get-Item -LiteralPath $link -Force).Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { Fail 'the junction is gone' }
     $history = @(Get-Content -LiteralPath (Join-Path $data 'history.jsonl') | ForEach-Object { $_ | ConvertFrom-Json })
     if ($history.Count -ne 3) { Fail "history.jsonl has $($history.Count) entries; want 3" }

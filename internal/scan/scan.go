@@ -118,8 +118,11 @@ func Run(ctx context.Context, l fsx.Lister, opts Options) (*Result, error) {
 	stop := context.AfterFunc(ctx, s.q.close)
 	defer stop()
 	done := make(chan struct{})
+	reported := make(chan struct{}) // closed once the reporter has stopped
 	if opts.Progress != nil {
-		go s.report(opts.Progress, res.Started, done)
+		go s.report(opts.Progress, res.Started, done, reported)
+	} else {
+		close(reported)
 	}
 	var wg sync.WaitGroup
 	workerState := make([]worker, workers)
@@ -139,6 +142,8 @@ func Run(ctx context.Context, l fsx.Lister, opts Options) (*Result, error) {
 	}
 	wg.Wait()
 	close(done)
+	// No progress report may come after Run returns, or after the last one.
+	<-reported
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -257,7 +262,8 @@ func (s *state) process(j job, w *worker) {
 	}
 }
 
-func (s *state) report(fn func(Progress), started time.Time, done <-chan struct{}) {
+func (s *state) report(fn func(Progress), started time.Time, done <-chan struct{}, reported chan<- struct{}) {
+	defer close(reported)
 	t := time.NewTicker(250 * time.Millisecond)
 	defer t.Stop()
 	for {

@@ -191,6 +191,8 @@ func New(delay time.Duration) *Machine {
 		History:   &store.MemoryHistory{},
 	}
 	m.Actions = cleanups(f, m.Env)
+	m.Probes.DISM = execx.NewLock() // DISM refuses to run twice at once
+	m.Actions.DISM = m.Probes.DISM
 	f.SetDelay(delay)
 	return m
 }

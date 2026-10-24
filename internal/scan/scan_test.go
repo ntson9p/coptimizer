@@ -384,3 +384,64 @@ func TestRefreshMeasuresFoldersAgainInACopy(t *testing.T) {
 		t.Error("parent links point into the old result")
 	}
 }
+
+// TestRefreshNeverMeasuresThroughAJunction replaces a cleaned folder with a
+// junction to the whole drive, as malware racing the cleanup might: the
+// refresh keeps it as a link, as a scan would, and measures nothing behind it.
+func TestRefreshNeverMeasuresThroughAJunction(t *testing.T) {
+	f := memfs.New()
+	f.AddFile(`C:\Users\a\cache\x.bin`, 1<<20, t0)
+	f.AddFile(`C:\Windows\big.dll`, 50<<20, t0)
+	res := run(t, f, scan.Options{Roots: []string{`C:\`}})
+	tree, _ := f.Open(`C:\Users\a\cache`)
+	tree.Remove("x.bin")
+	parent, _ := f.Open(`C:\Users\a`)
+	parent.Remove("cache")
+	f.AddJunction(`C:\Users\a\cache`)
+
+	got, err := scan.Refresh(context.Background(), f, res, []string{`C:\Users\a\cache`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.Find(`C:\Users\a\cache`); n == nil || !n.Link || n.Allocated != 0 {
+		t.Errorf("the swapped folder = %+v; want a link counted as empty", n)
+	}
+	if got.Allocated != 50<<20 {
+		t.Errorf("total = %d; want only the 50 MiB in Windows", got.Allocated)
+	}
+}
+
+func TestRefreshChecksSingleFiles(t *testing.T) {
+	f := memfs.New()
+	f.AddFile(`C:\Windows\MEMORY.DMP`, 900<<20, t0)
+	f.AddFile(`C:\Windows\notepad.exe`, 1<<20, t0)
+	f.AddFile(`C:\Temp\Photoshop Temp1`, 300<<20, t0)
+	res := run(t, f, scan.Options{Roots: []string{`C:\`}})
+	tree, _ := f.Open(`C:\Windows`)
+	tree.Remove("MEMORY.DMP")
+
+	got, err := scan.Refresh(context.Background(), f, res, []string{`C:\Windows\MEMORY.DMP`, `C:\Temp\Photoshop Temp1`, `C:\Temp\never-seen`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := got.Find(`C:\Windows`); w.Allocated != 1<<20 || w.OwnFiles != 1 {
+		t.Errorf(`C:\Windows after its dump was deleted = %d bytes, %d files`, w.Allocated, w.OwnFiles)
+	}
+	if got.Find(`C:\Temp`).Allocated != 300<<20 || len(got.Largest) != 2 {
+		t.Errorf("a file that is still there changed: %+v", got.Largest)
+	}
+	if res.Find(`C:\Windows`).Allocated != 901<<20 {
+		t.Error("Refresh changed the result it was given")
+	}
+}
+
+func TestRefreshStopsWhenCancelled(t *testing.T) {
+	f := memfs.New()
+	f.AddFile(`C:\a\x.bin`, 1<<20, t0)
+	res := run(t, f, scan.Options{Roots: []string{`C:\`}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := scan.Refresh(ctx, f, res, []string{`C:\a`}); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v; want cancelled", err)
+	}
+}

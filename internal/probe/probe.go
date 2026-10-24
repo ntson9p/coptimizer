@@ -41,9 +41,12 @@ type Result struct {
 
 // Deps are what the probes read from.
 type Deps struct {
-	Registry    Registry
-	Stat        func(path string) (size int64, ok bool) // size of an existing file
-	Runner      execx.Runner
+	Registry Registry
+	Stat     func(path string) (size int64, ok bool) // size of an existing file
+	Runner   execx.Runner
+	// DISM is shared with the cleanups that run DISM: it refuses to run
+	// twice at once. nil: the probes get one of their own.
+	DISM        execx.Lock
 	Elevated    bool
 	SystemRoot  string // `C:\Windows`
 	SystemDrive string // `C:`
@@ -75,7 +78,6 @@ type Manager struct {
 	notify func(Result)
 	ctx    context.Context
 	cancel context.CancelFunc
-	dism   sync.Mutex
 
 	mu      sync.Mutex
 	results map[string]Result
@@ -89,6 +91,9 @@ func NewManager(d Deps, notify func(Result)) *Manager {
 	}
 	if notify == nil {
 		notify = func(Result) {}
+	}
+	if d.DISM == nil {
+		d.DISM = execx.NewLock()
 	}
 	m := &Manager{deps: d, notify: notify, results: make(map[string]Result), running: make(map[string]bool)}
 	m.ctx, m.cancel = context.WithCancel(context.Background())
@@ -135,8 +140,12 @@ func (m *Manager) run(name string) {
 			continue
 		}
 		if p.dism {
-			m.dism.Lock()
-			defer m.dism.Unlock()
+			// A DISM cleanup may hold it for many minutes; the probe shows
+			// "running" meanwhile and then reports the cleaned store.
+			if err := m.deps.DISM.Acquire(m.ctx); err != nil {
+				return // shutting down
+			}
+			defer m.deps.DISM.Release()
 		}
 		data, state, msg := p.run(m.ctx, m.deps)
 		if m.ctx.Err() != nil {

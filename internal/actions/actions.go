@@ -34,9 +34,12 @@ type Deps struct {
 	RecycleBin sysinfo.RecycleBinReader
 	Mutator    sysinfo.Mutator // nil: the Recycle Bin can't be emptied
 	Runner     execx.Runner    // runs Windows' own tools only
-	Elevated   bool
-	Env        rules.Env // its CurrentProfile is "your" profile
-	Now        func() time.Time
+	// DISM is shared with the DISM probes: DISM refuses to run twice at
+	// once. nil: nothing else runs DISM.
+	DISM     execx.Lock
+	Elevated bool
+	Env      rules.Env // its CurrentProfile is "your" profile
+	Now      func() time.Time
 }
 
 // Reasons a location of a finding is left out of a plan.
@@ -77,16 +80,17 @@ type Plan struct {
 	NeedsAdmin  bool             `json:"needsAdmin,omitempty"`
 	Elevated    bool             `json:"elevated"`
 	Long        bool             `json:"long,omitempty"`
+	Stoppable   bool             `json:"stoppable"` // a run can be stopped half-way
 	MinAgeHours int              `json:"minAgeHours,omitempty"`
 	Blocked     string           `json:"blocked,omitempty"` // why it can't run now
 
 	spec clean.Spec // Delete: what the run may delete
 	cmd  *execx.Cmd // tool actions
-	scan []string   // folders to measure again afterwards
+	scan []string   // folders and files to measure again afterwards
 }
 
-// Rescan returns the folders whose size the run changes, to measure again
-// afterwards.
+// Rescan returns the folders and single files whose size the run changes, to
+// measure again afterwards.
 func (p *Plan) Rescan() []string { return slices.Clone(p.scan) }
 
 // ErrNoAction is returned for a finding COptimizer can't act on.
@@ -104,6 +108,7 @@ func Prepare(ctx context.Context, d Deps, rep rules.Report, f rules.Finding) (*P
 	var err error
 	switch a.Kind {
 	case rules.Delete:
+		p.Stoppable = true
 		err = prepareDelete(ctx, d, rep, f, p)
 	case rules.EmptyRecycleBin:
 		p.Bytes, p.Items, err = d.RecycleBin.RecycleBin(p.Drive)
@@ -146,7 +151,7 @@ func prepareDelete(ctx context.Context, d Deps, rep rules.Report, f rules.Findin
 		}
 		if it.Kind == "file" {
 			spec.Files = append(spec.Files, it.Path)
-			p.scan = append(p.scan, parent(it.Path))
+			p.scan = append(p.scan, it.Path)
 			continue
 		}
 		spec.Folders = append(spec.Folders, it.Path)
@@ -279,6 +284,17 @@ func Run(ctx context.Context, d Deps, p *Plan, simulate bool, progress func(Prog
 		if d.Mutator == nil {
 			return Outcome{State: Failed, Error: "the Recycle Bin can't be emptied here"}
 		}
+		// Windows empties the whole bin, so it must hold just what the
+		// preview showed: not something deleted since, perhaps by mistake.
+		bytes, items, err := d.RecycleBin.RecycleBin(p.Drive)
+		switch {
+		case err != nil:
+			return Outcome{State: Failed, Error: err.Error()}
+		case items == 0:
+			return Outcome{State: Succeeded} // already empty
+		case bytes != p.Bytes || items != p.Items:
+			return Outcome{State: Failed, Error: "the Recycle Bin changed since the preview; preview it again"}
+		}
 		if err := d.Mutator.EmptyRecycleBin(p.Drive); err != nil {
 			return Outcome{State: Failed, Error: err.Error()}
 		}
@@ -298,6 +314,15 @@ func Run(ctx context.Context, d Deps, p *Plan, simulate bool, progress func(Prog
 var progressBar = regexp.MustCompile(`^\[[= ]*(\d{1,3}(?:\.\d)?)%[= ]*\]$`)
 
 func runTool(ctx context.Context, d Deps, p *Plan, progress func(Progress), logf func(string)) Outcome {
+	if p.Kind == rules.ComponentCleanup && d.DISM != nil {
+		if !d.DISM.TryAcquire() {
+			logf("Waiting for DISM to finish an analysis…")
+			if err := d.DISM.Acquire(ctx); err != nil {
+				return Outcome{State: Cancelled}
+			}
+		}
+		defer d.DISM.Release()
+	}
 	c := *p.cmd
 	c.Output = func(line string) {
 		if m := progressBar.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
@@ -322,12 +347,13 @@ func runTool(ctx context.Context, d Deps, p *Plan, progress func(Progress), logf
 }
 
 // componentCleanup is DISM's cleanup of components that updates replaced. It
-// can take many minutes. /English keeps its output readable whatever the
-// display language.
+// can take many minutes, and it has no time limit: it can't be stopped
+// safely, so it runs until it finishes (or COptimizer is made to quit).
+// /English keeps its output readable whatever the display language.
 func componentCleanup(env rules.Env) *execx.Cmd {
 	sys32 := env.Windows + `\System32`
 	return &execx.Cmd{Path: sys32 + `\dism.exe`, Args: []string{"/Online", "/English", "/Cleanup-Image", "/StartComponentCleanup"},
-		Dir: sys32, Timeout: 3 * time.Hour}
+		Dir: sys32}
 }
 
 // deliveryOptimization asks the Delivery Optimization service, through its
@@ -362,14 +388,6 @@ func quote(s string) string {
 func under(path, dir string) bool {
 	return dir != "" && (strings.EqualFold(path, dir) ||
 		len(path) > len(dir) && path[len(dir)] == '\\' && strings.EqualFold(path[:len(dir)], dir))
-}
-
-func parent(path string) string {
-	i := strings.LastIndexByte(path, '\\')
-	if i <= 2 {
-		return path[:3]
-	}
-	return path[:i]
 }
 
 func baseName(path string) string { return path[strings.LastIndexByte(path, '\\')+1:] }

@@ -2,7 +2,9 @@ package clean_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -432,4 +434,195 @@ func TestAHundredThousandFiles(t *testing.T) {
 	if d := time.Since(start); d > 20*time.Second {
 		t.Errorf("took %v", d)
 	}
+}
+
+func TestPathsThatArentPlainLocalPathsAreRefused(t *testing.T) {
+	res := run(t, memfs.New(), clean.Spec{Folders: []string{`relative\path`, `C:\Temp\..\Windows`}, Files: []string{`C:\x.txt:hidden`}}, false)
+	for _, loc := range res.Locations {
+		if loc.State != clean.Refused || loc.Reason != clean.ReasonPolicy {
+			t.Errorf("%s: %+v; want refused", loc.Path, loc)
+		}
+	}
+}
+
+func TestUnreadableFoldersAreReportedAndKept(t *testing.T) {
+	f := memfs.New()
+	old(f, temp+`\a.tmp`, 10)
+	old(f, temp+`\locked\b.tmp`, 10)
+	f.Deny(temp + `\locked`)
+	res := run(t, f, clean.Spec{Folders: []string{temp}}, false)
+	loc := res.Locations[0]
+	if loc.Files != 1 || len(loc.Problems) != 1 || loc.Problems[0].Reason != clean.ReasonDenied || !f.Exists(temp+`\locked\b.tmp`) {
+		t.Errorf("location = %+v", loc)
+	}
+}
+
+func TestSingleFilesThatArentFilesOrCantBeSeen(t *testing.T) {
+	f := memfs.New()
+	f.AddDir(`C:\Windows\MEMORY.DMP`) // a folder with the dump's name
+	old(f, `C:\Windows\Minidump\x.dmp`, 10)
+	f.Deny(`C:\Windows\Minidump`)
+	res := run(t, f, clean.Spec{Files: []string{`C:\Windows\MEMORY.DMP`, `C:\Windows\Minidump\x.dmp`}}, false)
+	if loc := res.Locations[0]; loc.State != clean.Refused || loc.Reason != clean.ReasonError || !f.Exists(`C:\Windows\MEMORY.DMP`) {
+		t.Errorf("a folder named like the file: %+v", loc)
+	}
+	if loc := res.Locations[1]; loc.State != clean.Refused || loc.Reason != clean.ReasonDenied || !f.Exists(`C:\Windows\Minidump\x.dmp`) {
+		t.Errorf("a file whose folder can't be listed: %+v", loc)
+	}
+}
+
+func TestAnEmptiedFolderThatCantBeRemovedStays(t *testing.T) {
+	f := memfs.New()
+	old(f, `C:\NVIDIA\setup.exe`, 10)
+	f.Lock(`C:\NVIDIA`) // held open by another program
+	res := run(t, f, clean.Spec{Folders: []string{`C:\NVIDIA`}, RemoveRoot: true}, false)
+	loc := res.Locations[0]
+	if loc.Files != 1 || loc.Folders != 0 || len(loc.Problems) != 1 || loc.Problems[0].Reason != clean.ReasonInUse || !f.Exists(`C:\NVIDIA`) {
+		t.Errorf("location = %+v", loc)
+	}
+}
+
+// parentElsewhere opens the parent of the folder being removed somewhere
+// else, as a junction swapped in above it would.
+type parentElsewhere struct {
+	*memfs.FS
+	parent, to string
+}
+
+func (p parentElsewhere) Open(path string) (fsx.Tree, error) {
+	if strings.EqualFold(path, p.parent) {
+		return p.FS.Open(p.to)
+	}
+	return p.FS.Open(path)
+}
+
+func TestAFolderIsRemovedOnlyFromItsRealParent(t *testing.T) {
+	f := memfs.New()
+	old(f, `C:\NVIDIA\setup.exe`, 10)
+	f.AddDir(`C:\Users\alice\Documents\NVIDIA`)
+	res, err := clean.Run(context.Background(), parentElsewhere{f, `C:\`, `C:\Users\alice\Documents`},
+		clean.Spec{Folders: []string{`C:\NVIDIA`}, RemoveRoot: true}, clean.Options{Policy: policy(t), Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := res.Locations[0]
+	if len(loc.Problems) != 1 || loc.Problems[0].Reason != clean.ReasonLink || !f.Exists(`C:\Users\alice\Documents\NVIDIA`) {
+		t.Errorf("location = %+v", loc)
+	}
+}
+
+// refusing opens nothing, with the given error.
+type refusing struct{ err error }
+
+func (r refusing) Open(string) (fsx.Tree, error) { return nil, r.err }
+
+func TestWhyAFolderCouldntBeOpened(t *testing.T) {
+	for err, want := range map[error]string{
+		fsx.ErrNotLocal:          clean.ReasonPolicy,
+		fsx.ErrLink:              clean.ReasonLink,
+		fs.ErrPermission:         clean.ReasonDenied,
+		errors.New("disk error"): clean.ReasonError,
+	} {
+		res, _ := clean.Run(context.Background(), refusing{err}, clean.Spec{Folders: []string{temp}}, clean.Options{Policy: policy(t), Now: now})
+		if loc := res.Locations[0]; loc.State != clean.Refused || loc.Reason != want {
+			t.Errorf("%v: %+v; want %s", err, loc, want)
+		}
+	}
+}
+
+func TestSingleFilesAmongOthersAndMissingOnes(t *testing.T) {
+	f := memfs.New()
+	old(f, `C:\Windows\Minidump\a.dmp`, 10)
+	old(f, `C:\Windows\Minidump\b.dmp`, 10)
+	res := run(t, f, clean.Spec{Files: []string{`C:\Windows\Minidump\b.dmp`, `C:\Windows\Minidump\gone.dmp`}}, false)
+	if res.Locations[0].Files != 1 || f.Exists(`C:\Windows\Minidump\b.dmp`) || !f.Exists(`C:\Windows\Minidump\a.dmp`) {
+		t.Errorf("b.dmp: %+v", res.Locations[0])
+	}
+	if res.Locations[1].State != clean.Missing {
+		t.Errorf("a file that isn't there: %+v", res.Locations[1])
+	}
+}
+
+func TestCancelledBeforeTheSingleFiles(t *testing.T) {
+	f := memfs.New()
+	old(f, `C:\Windows\MEMORY.DMP`, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := clean.Run(ctx, f, clean.Spec{Files: []string{`C:\Windows\MEMORY.DMP`}}, clean.Options{Policy: policy(t), Now: now})
+	if err != context.Canceled || len(res.Locations) != 0 || !f.Exists(`C:\Windows\MEMORY.DMP`) {
+		t.Errorf("res = %+v, %v", res, err)
+	}
+}
+
+func TestASubfolderThatCantBeRemovedStays(t *testing.T) {
+	f := memfs.New()
+	old(f, temp+`\sub\a.tmp`, 10)
+	f.Lock(temp + `\sub`)
+	res := run(t, f, clean.Spec{Folders: []string{temp}}, false)
+	if loc := res.Locations[0]; loc.Files != 1 || loc.Folders != 0 || !f.Exists(temp+`\sub`) {
+		t.Errorf("location = %+v", loc)
+	}
+}
+
+// vanishing is a file system where one file disappears just before the
+// deleter gets to it, as when its program deletes it first.
+type vanishing struct {
+	*memfs.FS
+	name string
+}
+
+func (v vanishing) Open(path string) (fsx.Tree, error) {
+	t, err := v.FS.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return vanishingTree{t, v.name}, nil
+}
+
+type vanishingTree struct {
+	fsx.Tree
+	name string
+}
+
+func (t vanishingTree) Remove(rel string) error {
+	if rel == t.name {
+		t.Tree.Remove(rel)
+		return fs.ErrNotExist
+	}
+	return t.Tree.Remove(rel)
+}
+
+func TestAFileGoneBeforeItsTurnCountsAsGone(t *testing.T) {
+	f := memfs.New()
+	old(f, temp+`\a.tmp`, 10)
+	res, err := clean.Run(context.Background(), vanishing{f, "a.tmp"}, clean.Spec{Folders: []string{temp}}, clean.Options{Policy: policy(t), Now: now})
+	if err != nil || res.Skipped != 0 || len(res.Locations[0].Problems) != 0 || f.Exists(temp+`\a.tmp`) {
+		t.Errorf("res = %+v, %v", res.Locations[0], err)
+	}
+}
+
+func TestAParentThatCantBeOpenedKeepsTheFolder(t *testing.T) {
+	f := memfs.New()
+	old(f, `C:\NVIDIA\setup.exe`, 10)
+	res, err := clean.Run(context.Background(), parentRefusing{f, `C:\`}, clean.Spec{Folders: []string{`C:\NVIDIA`}, RemoveRoot: true},
+		clean.Options{Policy: policy(t), Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc := res.Locations[0]; loc.Files != 1 || len(loc.Problems) != 1 || loc.Problems[0].Reason != clean.ReasonDenied || !f.Exists(`C:\NVIDIA`) {
+		t.Errorf("location = %+v", loc)
+	}
+}
+
+// parentRefusing can't open one folder: no permission.
+type parentRefusing struct {
+	*memfs.FS
+	parent string
+}
+
+func (p parentRefusing) Open(path string) (fsx.Tree, error) {
+	if strings.EqualFold(path, p.parent) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+	}
+	return p.FS.Open(path)
 }

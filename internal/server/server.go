@@ -122,6 +122,10 @@ func (s *Server) Link(code string) string {
 	return fmt.Sprintf("http://127.0.0.1:%d/#code=%s", s.cfg.Port, code)
 }
 
+// BeginShutdown stops new cleanups from starting, before the server stops.
+// Unless force is set, it refuses while a cleanup is queued or running.
+func (s *Server) BeginShutdown(force bool) error { return s.jobs.beginShutdown(force) }
+
 // NewLaunchLink makes another one-time code and returns the link using it.
 func (s *Server) NewLaunchLink() string { return s.Link(s.sessions.newCode()) }
 
@@ -435,8 +439,8 @@ func (s *Server) runProbe(r *http.Request) (any, error) {
 }
 
 func (s *Server) shutdown(*http.Request) (any, error) {
-	if s.jobs.busy() {
-		return nil, &apiError{Status: 409, Code: "busy", Message: "a cleanup is running; wait for it to finish first"}
+	if err := s.jobs.beginShutdown(false); err != nil {
+		return nil, err
 	}
 	if s.cfg.Shutdown != nil {
 		// Let this response reach the page first.
@@ -498,8 +502,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
-	after, _ := strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64)
-	replay, ch, cancel := s.hub.subscribe(after)
+	// A page that saw any event before, even only the hello, resumes after
+	// it; one that saw nothing gets only what happens from now on (it loads
+	// the current state when it receives the hello).
+	last := r.Header.Get("Last-Event-ID")
+	after, err := strconv.ParseInt(last, 10, 64)
+	replay, latest, ch, cancel := s.hub.subscribe(after, last != "" && err == nil)
 	defer cancel()
 
 	h := w.Header()
@@ -508,7 +516,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	hello, _ := json.Marshal(s.statusValue())
-	writeEvent(w, event{Type: "hello", Data: hello})
+	writeEvent(w, event{ID: latest, Type: "hello", Data: hello})
 	for _, e := range replay {
 		writeEvent(w, e)
 	}

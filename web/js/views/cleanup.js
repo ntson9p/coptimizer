@@ -23,9 +23,11 @@ export function openCleanup(f) {
   const title = h('h2', { id: 'cleanup-title' }, t(`action.${f.action.kind}.title`, { name: t(`rule.${f.id}.title`) }));
   const body = h('div', { class: 'dialog-body' });
   const dlg = h('dialog', { class: 'cleanup', 'aria-labelledby': 'cleanup-title' }, title, body);
-  let unsubscribe = null;
+  let unsubscribe = null; // following a cleanup
+  let unwatch = null; // watching simulation mode while a preview shows
   dlg.addEventListener('close', () => {
     unsubscribe?.();
+    unwatch?.();
     dlg.remove();
   });
   document.body.append(dlg);
@@ -33,6 +35,8 @@ export function openCleanup(f) {
   preview();
 
   async function preview() {
+    unwatch?.();
+    unwatch = null;
     body.replaceChildren(h('p', { class: 'muted' }, t('cleanup.preparing')));
     try {
       renderPlan(await api.plan(f.id));
@@ -51,6 +55,7 @@ export function openCleanup(f) {
     if (plan.minAgeHours) parts.push(h('p', { class: 'muted' }, t('cleanup.minAge', { hours: plan.minAgeHours })));
     if (plan.command) parts.push(h('p', { class: 'muted' }, t('cleanup.command')), h('pre', { class: 'command' }, plan.command));
     if (plan.long) parts.push(h('p', { class: 'note warn' }, t('cleanup.long')));
+    if (plan.kind === 'delete') parts.push(h('p', { class: 'muted' }, t('cleanup.skipped')));
     if (plan.locations?.length) parts.push(locations(plan.locations));
     if (plan.left?.length) parts.push(left(plan.left));
     if (plan.simulate) parts.push(h('p', { class: 'note' }, t('cleanup.simulate')));
@@ -66,10 +71,13 @@ export function openCleanup(f) {
       onclick: async () => {
         go.disabled = true;
         try {
-          follow((await api.startJob(plan.id)).id);
+          const job = await api.startJob(plan.id);
+          unwatch?.();
+          unwatch = null;
+          follow(job.id);
         } catch (e) {
           go.disabled = false;
-          if (e.code === 'plan_expired' || e.code === 'close-programs') preview();
+          if (['plan_expired', 'plan_stale', 'close-programs'].includes(e.code)) preview();
           else alert(t('error.generic', { message: e.message }));
         }
       },
@@ -77,8 +85,21 @@ export function openCleanup(f) {
     const again = plan.blocked === 'close-programs'
       ? h('button', { type: 'button', onclick: preview }, t('cleanup.checkAgain'))
       : null;
-    body.replaceChildren(...parts, buttons(go, again, close(t('cleanup.cancel'))));
-    (plan.blocked ? again ?? dlg.querySelector('button:not([disabled])') : go)?.focus();
+    const cancel = close(t('cleanup.cancel'));
+    body.replaceChildren(...parts, buttons(go, again, cancel));
+    // Not the button that cleans: pressing Enter twice must not run a
+    // cleanup nobody has read.
+    (again ?? cancel).focus();
+    // A preview shows a simulation or a real cleanup: if the mode changes
+    // meanwhile (in another tab), show the preview afresh. Only a change
+    // counts, so a late update can't make previews repeat.
+    let seen = Boolean(store.state.status?.simulate);
+    unwatch = store.subscribe((state) => {
+      const now = Boolean(state.status?.simulate);
+      if (now === seen) return;
+      seen = now;
+      if (now !== Boolean(plan.simulate)) preview();
+    });
   }
 
   // follow shows a confirmed cleanup until it ends.
@@ -111,7 +132,7 @@ export function openCleanup(f) {
       current: h('div', { class: 'scan-path muted' }),
       log: h('pre', { class: 'log', hidden: true }),
     };
-    const stop = j.long && !j.simulated
+    const stop = !j.stoppable
       ? h('p', { class: 'note warn' }, t('cleanup.cantStop'))
       : h('button', { type: 'button', onclick: () => api.cancelJob(j.id).catch(() => {}) }, t('cleanup.stop'));
     body.replaceChildren(

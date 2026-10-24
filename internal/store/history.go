@@ -53,7 +53,7 @@ func OpenHistory(dir string) *History { return &History{path: filepath.Join(dir,
 // Path is the log's file.
 func (h *History) Path() string { return h.path }
 
-// Add appends e to the log.
+// Add appends e to the log, through the data folder's handle (see openData).
 func (h *History) Add(e HistoryEntry) error {
 	line, err := json.Marshal(e)
 	if err != nil {
@@ -61,15 +61,23 @@ func (h *History) Add(e HistoryEntry) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	dir := filepath.Dir(h.path)
-	safety.GuardWrite(dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	safety.GuardWrite(h.path)
-	f, err := os.OpenFile(h.path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	root, err := openData(filepath.Dir(h.path))
 	if err != nil {
 		return err
+	}
+	defer root.Close()
+	safety.GuardWrite(h.path)
+	f, err := root.OpenFile(historyFile, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	// A write cut short (the PC lost power) leaves a line without its end;
+	// end it first, so this entry stays readable.
+	if st, err := f.Stat(); err == nil && st.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := f.ReadAt(last, st.Size()-1); err == nil && last[0] != '\n' {
+			line = append([]byte{'\n'}, line...)
+		}
 	}
 	_, err = f.Write(append(line, '\n'))
 	if cerr := f.Close(); err == nil {

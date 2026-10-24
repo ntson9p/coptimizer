@@ -2,48 +2,41 @@ package scan
 
 import (
 	"context"
-	"errors"
-	"io/fs"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ntson9p/coptimizer/internal/fsx"
 )
 
-// Refresh measures the folders at paths again, after a cleanup, and returns a
-// copy of res with their new contents and every total above them updated. res
-// itself doesn't change, so readers of it are never disturbed. Folders that
-// are gone are removed from the copy; paths the scan never saw are ignored.
+// Refresh measures again, after a cleanup, the folders and single files at
+// paths, and returns a copy of res with their new contents and every total
+// above them updated. res itself doesn't change, so readers of it are never
+// disturbed. Paths the scan never saw are ignored.
+//
+// A folder is first looked up in its parent's listing, as a scan would meet
+// it: one that is gone is removed, and one that has become a junction or link
+// is kept as a link and never measured through. A single file is only checked
+// for whether it is gone.
 //
 // Each folder is measured on its own, so a file hard-linked from outside it
 // counts in full there. That suits caches and temporary folders; folders full
 // of shared files, like WinSxS, need a new scan of the whole drive. The
-// totals by file type stay as they were.
+// totals by file type, of hard links and of online-only files stay as they
+// were.
 func Refresh(ctx context.Context, l fsx.Lister, res *Result, paths []string) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err // shutting down: don't copy the whole tree for nothing
+	}
 	out := res.clone()
 	for _, p := range paths {
-		n := out.Find(p)
-		if n == nil || n.Link {
+		if n := out.Find(p); n != nil {
+			if err := refreshFolder(ctx, l, out, n, len(res.Largest)); err != nil {
+				return nil, err
+			}
 			continue
 		}
-		path := n.Path()
-		out.Largest = slices.DeleteFunc(out.Largest, func(f File) bool { return within(f.Path, path) })
-		if _, err := l.List(path); errors.Is(err, fs.ErrNotExist) && n.Parent != nil {
-			n.Parent.Children = slices.DeleteFunc(n.Parent.Children, func(c *Node) bool { return c == n })
-			continue
-		}
-		fresh, err := Run(ctx, l, Options{Roots: []string{path}, TopFiles: max(len(res.Largest), 1)})
-		if err != nil {
-			return nil, err
-		}
-		root := fresh.Roots[0]
-		n.Children = root.Children
-		for _, c := range n.Children {
-			c.Parent = n
-		}
-		n.OwnSize, n.OwnAllocated, n.OwnFiles, n.ownNewest = root.OwnSize, root.OwnAllocated, root.OwnFiles, root.ownNewest
-		n.Denied = root.Denied
-		out.Largest = append(out.Largest, fresh.Largest...)
+		refreshFile(l, out, p)
 	}
 	slices.SortFunc(out.Largest, func(a, b File) int {
 		switch {
@@ -66,6 +59,84 @@ func Refresh(ctx context.Context, l fsx.Lister, res *Result, paths []string) (*R
 		out.Folders += root.Folders
 	}
 	return out, nil
+}
+
+// refreshFolder measures the folder n of out again.
+func refreshFolder(ctx context.Context, l fsx.Lister, out *Result, n *Node, topFiles int) error {
+	if n.Link {
+		return nil
+	}
+	path := n.Path()
+	out.Largest = slices.DeleteFunc(out.Largest, func(f File) bool { return within(f.Path, path) })
+	if n.Parent != nil {
+		e, found, err := lookup(l, n.Parent.Path(), n.Name)
+		switch {
+		case err != nil:
+			// The parent can't be listed: measure the folder itself.
+		case !found || !e.IsDir():
+			n.Parent.Children = slices.DeleteFunc(n.Parent.Children, func(c *Node) bool { return c == n })
+			return nil
+		case e.IsReparse():
+			// Kept as a scan meets a link: listed, never followed.
+			n.Link, n.Denied, n.Children = true, false, nil
+			n.OwnSize, n.OwnAllocated, n.OwnFiles, n.ownNewest = 0, 0, 0, time.Time{}
+			return nil
+		}
+	}
+	fresh, err := Run(ctx, l, Options{Roots: []string{path}, TopFiles: max(topFiles, 1)})
+	if err != nil {
+		return err
+	}
+	root := fresh.Roots[0]
+	n.Children = root.Children
+	for _, c := range n.Children {
+		c.Parent = n
+	}
+	n.OwnSize, n.OwnAllocated, n.OwnFiles, n.ownNewest = root.OwnSize, root.OwnAllocated, root.OwnFiles, root.ownNewest
+	n.Denied = root.Denied
+	out.Largest = append(out.Largest, fresh.Largest...)
+	return nil
+}
+
+// refreshFile checks whether the single file at path, one of the scan's
+// largest files, is gone; if so it leaves the list, and its size leaves its
+// folder.
+func refreshFile(l fsx.Lister, out *Result, path string) {
+	i := slices.IndexFunc(out.Largest, func(f File) bool { return strings.EqualFold(f.Path, path) })
+	cut := strings.LastIndexByte(path, '\\')
+	if i < 0 || cut < 0 {
+		return
+	}
+	dirPath := path[:cut]
+	if cut == 2 {
+		dirPath = path[:3] // a file at a drive root
+	}
+	dir := out.Find(dirPath)
+	if dir == nil {
+		return
+	}
+	if _, found, err := lookup(l, dirPath, path[cut+1:]); err != nil || found {
+		return // still there, or it can't be told
+	}
+	f := out.Largest[i]
+	out.Largest = slices.Delete(out.Largest, i, i+1)
+	dir.OwnSize -= f.Size
+	dir.OwnAllocated -= f.Allocated
+	dir.OwnFiles--
+}
+
+// lookup finds the entry called name in the folder dir.
+func lookup(l fsx.Lister, dir, name string) (fsx.Entry, bool, error) {
+	entries, err := l.List(dir)
+	if err != nil {
+		return fsx.Entry{}, false, err
+	}
+	for _, e := range entries {
+		if strings.EqualFold(e.Name, name) {
+			return e, true, nil
+		}
+	}
+	return fsx.Entry{}, false, nil
 }
 
 // clone copies the result deeply enough that Refresh can change the copy.

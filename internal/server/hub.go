@@ -58,13 +58,14 @@ func (h *hub) publish(typ string, v any, replay bool) {
 	}
 }
 
-// subscribe returns the kept events after the given ID, a channel for new
-// ones, and a function that ends the subscription.
-func (h *hub) subscribe(after int64) ([]event, <-chan event, func()) {
+// subscribe returns the kept events after the given ID (with resume false:
+// none), the ID of the last event sent so far, a channel for new events, and
+// a function that ends the subscription.
+func (h *hub) subscribe(after int64, resume bool) ([]event, int64, <-chan event, func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var replay []event
-	if after > 0 {
+	if resume {
 		for _, e := range h.kept {
 			if e.ID > after {
 				replay = append(replay, e)
@@ -73,7 +74,7 @@ func (h *hub) subscribe(after int64) ([]event, <-chan event, func()) {
 	}
 	ch := make(chan event, 256)
 	h.subs[ch] = true
-	return replay, ch, func() {
+	return replay, h.nextID, ch, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if h.subs[ch] {
@@ -93,9 +94,10 @@ func (h *hub) close() {
 	}
 }
 
-// writeEvent writes e in the text/event-stream format.
+// writeEvent writes e in the text/event-stream format. A hello always carries
+// an ID, even 0: the point a page resumes from after a reconnect.
 func writeEvent(w io.Writer, e event) error {
-	if e.ID > 0 {
+	if e.ID > 0 || e.Type == "hello" {
 		if _, err := fmt.Fprintf(w, "id: %d\n", e.ID); err != nil {
 			return err
 		}

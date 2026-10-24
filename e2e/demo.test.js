@@ -190,6 +190,9 @@ test('clean up the demo PC, preview first', async () => {
   await page.getByLabel('Simulation mode').uncheck();
   await page.locator('#simulate').waitFor({ state: 'hidden' });
   await tab(page, 'Findings').click();
+  // The findings load after the page shows: wait for them. A real cleanup
+  // would have measured the folders again and removed this finding.
+  await page.locator('article.finding').first().waitFor();
   assert.equal(await editor.count(), 1, 'a simulation must not clean anything');
 
   // The Recycle Bin, emptied through Windows (simulated here).
@@ -222,6 +225,38 @@ test('clean up the demo PC, preview first', async () => {
 
   assert.deepEqual(errors, [], 'the page logged errors');
   await page.close();
+});
+
+test('a preview follows simulation mode changed in another tab', async () => {
+  const a = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const b = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const errors = [...watchForErrors(a), ...watchForErrors(b)];
+  await a.goto(await newLink());
+  await b.goto(await newLink());
+  await a.locator('#conn', { hasText: 'Live' }).waitFor();
+  await b.locator('#conn', { hasText: 'Live' }).waitFor();
+
+  // Tab A previews a real cleanup; Cancel has the focus, not the cleanup.
+  await tab(a, 'Findings').click();
+  await a.locator('article[data-id="browsers.chrome-cache"]').getByRole('button', { name: 'Clean up…' }).click();
+  const dialog = a.locator('dialog.cleanup');
+  await dialog.getByRole('button', { name: 'Delete these files' }).waitFor({ timeout: 30000 });
+  assert.equal(await a.evaluate(() => document.activeElement?.textContent), 'Cancel');
+
+  // Tab B turns simulation on: tab A's preview is worked out again, and now
+  // promises only a simulation.
+  await tab(b, 'Activity').click();
+  await b.getByLabel('Simulation mode').check();
+  await dialog.getByText(/Simulation mode is on/).waitFor({ timeout: 30000 });
+  await dialog.getByRole('button', { name: 'Simulate' }).waitFor();
+  await a.screenshot({ path: path.join(shots, '14-preview-follows-mode.png') });
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await b.getByLabel('Simulation mode').uncheck();
+  await b.locator('#simulate').waitFor({ state: 'hidden' });
+
+  assert.deepEqual(errors, [], 'the pages logged errors');
+  await a.close();
+  await b.close();
 });
 
 test('a link that was used already does not sign in', async () => {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/ntson9p/coptimizer/internal/rules"
 	"github.com/ntson9p/coptimizer/internal/safety"
+	"github.com/ntson9p/coptimizer/internal/winfs"
 )
 
 // keepPerDrive is how many snapshots of each drive are kept.
@@ -128,20 +129,35 @@ func (s *Snapshots) save() error {
 	if err := zw.Close(); err != nil {
 		return err
 	}
-	dir, tmp := filepath.Dir(s.path), s.path+".tmp"
-	safety.GuardWrite(dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dir := filepath.Dir(s.path)
+	root, err := openData(dir)
+	if err != nil {
 		return err
 	}
-	safety.GuardWrite(tmp)
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+	defer root.Close()
+	tmp := fileName + ".tmp"
+	safety.GuardWrite(filepath.Join(dir, tmp))
+	if err := root.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
 		return err
 	}
-	safety.GuardDelete(tmp)
+	safety.GuardDelete(filepath.Join(dir, tmp))
 	safety.GuardWrite(s.path)
-	if err := os.Rename(tmp, s.path); err != nil {
-		os.Remove(tmp)
+	if err := root.Rename(tmp, fileName); err != nil {
+		root.Remove(tmp)
 		return err
 	}
 	return nil
+}
+
+// openData creates the data folder dir if needed and opens it for writing.
+// COptimizer writes there with Administrator rights, so it refuses a folder
+// reached through a junction or link: one an unprivileged user put there
+// could otherwise send those writes anywhere. Every file is then written
+// through the folder's handle, which never follows a link out of it.
+func openData(dir string) (*os.Root, error) {
+	safety.GuardWrite(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return winfs.OpenRoot(dir)
 }

@@ -196,12 +196,26 @@ func (m *scans) refresh(ctx context.Context, id string, paths []string) error {
 		return err
 	}
 	rep := rules.Evaluate(fresh, m.env, rules.Options{Previous: previous})
+	// The space in use now, so that "not accounted for" (in use minus
+	// counted) doesn't grow by what the cleanup freed.
+	var used int64 = -1
+	if drives, err := m.system.Drives(); err == nil {
+		used = 0
+		for _, r := range j.roots {
+			if d, ok := findDrive(drives, r); ok {
+				used += d.Used()
+			}
+		}
+	}
 	m.mu.Lock()
 	if j.result != res {
 		m.mu.Unlock()
 		return nil // refreshed by someone else meanwhile
 	}
 	j.result, j.report, j.updated = fresh, &rep, m.now()
+	if used >= 0 {
+		j.used = used
+	}
 	v := j.view()
 	m.mu.Unlock()
 	m.hub.publish("scan.updated", v, true)

@@ -37,19 +37,16 @@ var allowed = map[string][]string{
 	// Starts the elevated server and opens the browser; guarded by
 	// safety.GuardShellOpen.
 	"cmd/coptimizer/shell_windows.go": {"golang.org/x/sys/windows"},
-	// Saves scan snapshots in the app's data folder; guarded by
-	// safety.GuardWrite and GuardDelete.
-	"internal/store/store.go": {"os.MkdirAll", "os.Remove", "os.Rename", "os.WriteFile"},
-	// Appends to the cleanup history in the app's data folder; guarded by
-	// safety.GuardWrite.
-	"internal/store/history.go": {"os.MkdirAll", "os.OpenFile"},
+	// Creates the app's data folder, then writes scan snapshots through
+	// winfs.OpenRoot's handle; guarded by safety.GuardWrite and GuardDelete.
+	"internal/store/store.go": {"os.MkdirAll"},
 	// Runs programs, guarded by safety.GuardRun, inside a job object.
 	"internal/execx/real_windows.go": {"golang.org/x/sys/windows", "os/exec", "syscall", "unsafe"},
 	// Reads the registry: keys are opened with query and enumerate rights only.
 	"internal/probe/registry_windows.go": {"golang.org/x/sys/windows/registry"},
 	// The test binary starts itself as a grandchild, and checks that the job
-	// stopped it.
-	"internal/execx/real_test.go": {"golang.org/x/sys/windows", "os/exec"},
+	// stopped it; it also asks Windows which processes share its console.
+	"internal/execx/real_test.go": {"golang.org/x/sys/windows", "os/exec", "unsafe"},
 	// Test helpers; every change is checked by safety.GuardWrite or GuardDelete first.
 	"internal/sandbox/sandbox.go":          {"os.Link", "os.MkdirAll", "os.WriteFile"},
 	"internal/sandbox/junction_windows.go": {"golang.org/x/sys/windows", "os.Mkdir", "os.Remove"},

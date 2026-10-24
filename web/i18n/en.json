@@ -107,6 +107,7 @@
   "cleanup.command": "COptimizer runs exactly this command:",
   "cleanup.long": "This takes several minutes and can't be stopped once it has started. Keep COptimizer open until it finishes.",
   "cleanup.simulate": "Simulation mode is on: nothing will be deleted or changed. You'll see what would have happened.",
+  "cleanup.skipped": "Files in use, and files Windows doesn't allow COptimizer to delete, are skipped and stay where they are, so the space freed can be less.",
   "cleanup.blocked.needs-admin": "This cleanup needs Administrator rights. Start COptimizer by double-clicking it and accept the Windows prompt.",
   "cleanup.blocked.close-programs": "Close {programs} first, then check again.",
   "cleanup.blocked.nothing": "There's nothing to clean right now.",
