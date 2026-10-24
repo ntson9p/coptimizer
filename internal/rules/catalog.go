@@ -1,5 +1,7 @@
 package rules
 
+import "time"
+
 // The catalog: docs/space-hogs.md in a form the app can apply. The texts the
 // page shows for each rule are in web/i18n/rules.en.json under rule.<ID>.
 //
@@ -8,6 +10,11 @@ package rules
 
 // anySize reports a finding whatever its size.
 const anySize = int64(1)
+
+const (
+	day  = 24 * time.Hour
+	week = 7 * day
+)
 
 var catalog = []Rule{
 	// Windows system files.
@@ -20,6 +27,7 @@ var catalog = []Rule{
 	// Only part of WinSxS can be cleaned up, and only DISM can say how much
 	// (the componentStore probe), so its size isn't counted as reclaimable.
 	{ID: "system.component-store", Category: System, Risk: Info, Min: gb,
+		Action:  &Action{Kind: ComponentCleanup, Long: true},
 		Folders: []string{`{Windows}\WinSxS`}},
 	{ID: "system.installer-cache", Category: System, Risk: Info, Min: gb,
 		Folders: []string{`{Windows}\Installer`}},
@@ -27,20 +35,22 @@ var catalog = []Rule{
 		Folders: []string{`{Windows}\System32\DriverStore\FileRepository`}},
 	{ID: "system.search-index", Category: System, Risk: Moderate, Min: gb,
 		Folders: []string{`{ProgramData}\Microsoft\Search\Data\Applications\Windows`}},
-	{ID: "system.memory-dumps", Category: System, Risk: Safe, Min: 100 * mb,
+	{ID: "system.memory-dumps", Category: System, Risk: Safe, Min: 100 * mb, Action: del(),
 		Files:   []string{`{Windows}\MEMORY.DMP`},
 		Folders: []string{`{Windows}\Minidump`, `{Windows}\LiveKernelReports`}},
-	{ID: "system.error-reports", Category: System, Risk: Safe, Min: 100 * mb,
+	{ID: "system.error-reports", Category: System, Risk: Safe, Min: 100 * mb, Action: del(),
 		Folders: []string{`{ProgramData}\Microsoft\Windows\WER\ReportArchive`, `{ProgramData}\Microsoft\Windows\WER\ReportQueue`,
 			`{ProgramData}\Microsoft\Windows\WER\Temp`, `{LocalAppData}\Microsoft\Windows\WER`, `{LocalAppData}\CrashDumps`}},
 	{ID: "system.logs", Category: System, Risk: Safe, Min: 200 * mb,
+		Action: &Action{Kind: Delete, Folders: []string{`{Windows}\Logs\CBS`, `{Windows}\Logs\DISM`},
+			Include: []string{"*.log", "*.cab"}, MinAge: week},
 		Folders: []string{`{Windows}\Logs\CBS`, `{Windows}\Logs\DISM`, `{Windows}\Panther`, `{ProgramData}\Microsoft\Diagnosis`,
 			`{Windows}\System32\LogFiles\WMI`, `{SystemDrive}\inetpub\logs\LogFiles`}},
-	{ID: "system.temp", Category: System, Risk: Safe, Min: 100 * mb,
+	{ID: "system.temp", Category: System, Risk: Safe, Min: 100 * mb, Action: &Action{Kind: Delete, MinAge: day},
 		Folders: []string{`{Windows}\Temp`, `{Windows}\SystemTemp`}},
 	{ID: "system.thumbnails", Category: System, Risk: Safe, Min: 200 * mb,
 		Folders: []string{`{LocalAppData}\Microsoft\Windows\Explorer`}},
-	{ID: "system.shader-caches", Category: System, Risk: Safe, Min: 200 * mb,
+	{ID: "system.shader-caches", Category: System, Risk: Safe, Min: 200 * mb, Action: del(),
 		Folders: []string{`{LocalAppData}\D3DSCache`, `{LocalAppData}\NVIDIA\DXCache`, `{LocalAppData}\NVIDIA\GLCache`,
 			`{ProgramData}\NVIDIA Corporation\NV_Cache`, `{LocalAppData}\AMD\DxCache`, `{LocalAppData}\AMD\DxcCache`,
 			`{LocalAppData}\AMD\VkCache`, `{LocalAppData}\AMD\GLCache`, `{LocalAppData}\Intel\ShaderCache`}},
@@ -58,16 +68,22 @@ var catalog = []Rule{
 		Folders: []string{`{SystemDrive}\Windows.old*`}},
 	{ID: "updates.upgrade-files", Category: Updates, Risk: Moderate, Min: 100 * mb,
 		Folders: []string{`{SystemDrive}\$Windows.~BT`, `{SystemDrive}\$Windows.~WS`, `{SystemDrive}\$WINDOWS.~Q`, `{SystemDrive}\ESD`}},
+	// Windows10Upgrade is an installed app: it is uninstalled from Apps, not
+	// deleted. $GetCurrent untouched for a week isn't part of an upgrade.
 	{ID: "updates.update-assistant", Category: Updates, Risk: Safe, Min: 50 * mb,
+		Action: &Action{Kind: Delete, Folders: []string{`{SystemDrive}\$GetCurrent`, `{SystemDrive}\$SysReset`},
+			MinAge: week, RemoveRoot: true},
 		Folders: []string{`{SystemDrive}\$GetCurrent`, `{SystemDrive}\Windows10Upgrade`, `{SystemDrive}\$SysReset`}},
 	{ID: "updates.download-cache", Category: Updates, Risk: Safe, Min: 200 * mb,
 		Folders: []string{`{Windows}\SoftwareDistribution\Download`}},
 	{ID: "updates.delivery-optimization", Category: Updates, Risk: Safe, Min: 200 * mb,
+		Action: &Action{Kind: DeliveryOptimization},
 		Folders: []string{`{Windows}\SoftwareDistribution\DeliveryOptimization`,
 			`{Windows}\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization`}},
 
 	// Driver and hardware-vendor leftovers.
 	{ID: "drivers.installers", Category: Drivers, Risk: Safe, Min: 200 * mb,
+		Action:  &Action{Kind: Delete, MinAge: day, RemoveRoot: true},
 		Folders: []string{`{SystemDrive}\NVIDIA`, `{ProgramData}\NVIDIA Corporation\Downloader`, `{SystemDrive}\AMD`, `{SystemDrive}\Intel`}},
 	{ID: "drivers.oem-folders", Category: Drivers, Risk: Manual, Min: 500 * mb,
 		Folders: []string{`{SystemDrive}\SWSetup`, `{SystemDrive}\Drivers`, `{SystemDrive}\Dell`}},
@@ -87,34 +103,41 @@ var catalog = []Rule{
 	// Developer tools.
 	{ID: "dev.node-modules", Category: Dev, Risk: Manual, Min: 500 * mb, ItemMin: 100 * mb,
 		detect: nodeModules, stage: early},
-	{ID: "dev.npm-cache", Category: Dev, Risk: Safe, Min: 200 * mb,
+	{ID: "dev.npm-cache", Category: Dev, Risk: Safe, Min: 200 * mb, Action: del(),
 		Folders: []string{`{LocalAppData}\npm-cache`}},
+	// The package store is hard-linked into projects: only `pnpm store
+	// prune` knows what is unused. The metadata cache is a plain cache.
 	{ID: "dev.pnpm", Category: Dev, Risk: Safe, Min: 200 * mb,
+		Action:  &Action{Kind: Delete, Folders: []string{`{LocalAppData}\pnpm-cache`}},
 		Folders: []string{`{LocalAppData}\pnpm-cache`, `{LocalAppData}\pnpm\store`}},
-	{ID: "dev.yarn-bun", Category: Dev, Risk: Safe, Min: 200 * mb,
+	{ID: "dev.yarn-bun", Category: Dev, Risk: Safe, Min: 200 * mb, Action: del(),
 		Folders: []string{`{LocalAppData}\Yarn\Cache`, `{LocalAppData}\Yarn\Berry\cache`, `{Profile}\.bun\install\cache`}},
-	{ID: "dev.browser-testing", Category: Dev, Risk: Safe, Min: 200 * mb,
+	{ID: "dev.browser-testing", Category: Dev, Risk: Safe, Min: 200 * mb, Action: del(),
 		Folders: []string{`{LocalAppData}\ms-playwright`, `{Profile}\.cache\puppeteer`, `{LocalAppData}\Cypress\Cache`}},
-	{ID: "dev.python", Category: Dev, Risk: Safe, Min: 200 * mb,
+	// uv's cache must not change while uv runs.
+	{ID: "dev.python", Category: Dev, Risk: Safe, Min: 200 * mb, Action: del("uv.exe"),
 		Folders: []string{`{LocalAppData}\pip\Cache`, `{LocalAppData}\uv\cache`, `{LocalAppData}\pypoetry\Cache`}},
 	{ID: "dev.conda", Category: Dev, Risk: Safe, Min: 500 * mb,
 		Folders: []string{`{Profile}\anaconda3\pkgs`, `{Profile}\miniconda3\pkgs`, `{Profile}\.conda\pkgs`,
 			`{ProgramData}\anaconda3\pkgs`, `{ProgramData}\miniconda3\pkgs`}},
-	{ID: "dev.nuget", Category: Dev, Risk: Safe, Min: 500 * mb,
+	{ID: "dev.nuget", Category: Dev, Risk: Safe, Min: 500 * mb, Action: del(),
 		Folders: []string{`{Profile}\.nuget\packages`, `{LocalAppData}\NuGet\v3-cache`}},
+	// Maven's repository can hold JARs installed by hand that no server
+	// has: it is left to the user.
 	{ID: "dev.gradle-maven", Category: Dev, Risk: Safe, Min: 500 * mb,
+		Action:  &Action{Kind: Delete, Folders: []string{`{Profile}\.gradle\caches`, `{Profile}\.gradle\wrapper\dists`}},
 		Folders: []string{`{Profile}\.gradle\caches`, `{Profile}\.gradle\wrapper\dists`, `{Profile}\.m2\repository`}},
-	{ID: "dev.go", Category: Dev, Risk: Safe, Min: 500 * mb,
+	{ID: "dev.go", Category: Dev, Risk: Safe, Min: 500 * mb, Action: del(),
 		Folders: []string{`{LocalAppData}\go-build`, `{Profile}\go\pkg\mod`}},
-	{ID: "dev.rust", Category: Dev, Risk: Safe, Min: 500 * mb,
+	{ID: "dev.rust", Category: Dev, Risk: Safe, Min: 500 * mb, Action: del(),
 		Folders: []string{`{Profile}\.cargo\registry`, `{Profile}\.cargo\git`}},
-	{ID: "dev.other-caches", Category: Dev, Risk: Safe, Min: 200 * mb,
+	{ID: "dev.other-caches", Category: Dev, Risk: Safe, Min: 200 * mb, Action: del(),
 		Folders: []string{`{LocalAppData}\electron\Cache`, `{LocalAppData}\electron-builder\Cache`, `{LocalAppData}\node-gyp\Cache`,
 			`{LocalAppData}\Composer`, `{LocalAppData}\Pub\Cache`, `{LocalAppData}\deno`, `{Profile}\scoop\cache`,
 			`{LocalAppData}\Temp\chocolatey`, `{ProgramData}\chocolatey\lib-bkp`, `{LocalAppData}\Temp\WinGet`}},
 	{ID: "dev.vs-installer-cache", Category: Dev, Risk: Moderate, Min: gb,
 		Folders: []string{`{ProgramData}\Microsoft\VisualStudio\Packages`}},
-	{ID: "dev.vs-caches", Category: Dev, Risk: Safe, Min: 300 * mb,
+	{ID: "dev.vs-caches", Category: Dev, Risk: Safe, Min: 300 * mb, Action: del("devenv.exe"),
 		Folders: []string{`{LocalAppData}\Temp\SymbolCache`, `{LocalAppData}\Microsoft\VisualStudio\*\ComponentModelCache`}},
 	{ID: "dev.package-cache", Category: Dev, Risk: Info, Min: gb,
 		Folders: []string{`{ProgramData}\Package Cache`}},
@@ -125,6 +148,7 @@ var catalog = []Rule{
 	{ID: "dev.android-sdk", Category: Dev, Risk: Manual, Min: 2 * gb,
 		Folders: []string{`{LocalAppData}\Android\Sdk`}},
 	{ID: "dev.editor-caches", Category: Dev, Risk: Safe, Min: 200 * mb,
+		Action:  del("Code.exe", "Code - Insiders.exe", "Cursor.exe", "Windsurf.exe"),
 		Folders: editorCaches(`{AppData}\Code`, `{AppData}\Code - Insiders`, `{AppData}\Cursor`, `{AppData}\Windsurf`)},
 	{ID: "dev.editor-workspaces", Category: Dev, Risk: Moderate, Min: 500 * mb,
 		Folders: []string{`{AppData}\Code\User\workspaceStorage`, `{AppData}\Code - Insiders\User\workspaceStorage`,
@@ -133,9 +157,12 @@ var catalog = []Rule{
 		Folders: []string{`{Profile}\.vscode\extensions`, `{Profile}\.vscode-insiders\extensions`,
 			`{Profile}\.cursor\extensions`, `{Profile}\.windsurf\extensions`}},
 	{ID: "dev.jetbrains", Category: Dev, Risk: Safe, Min: 500 * mb,
+		Action: del("idea64.exe", "pycharm64.exe", "webstorm64.exe", "rider64.exe", "goland64.exe", "clion64.exe",
+			"phpstorm64.exe", "rubymine64.exe", "datagrip64.exe", "rustrover64.exe"),
 		Folders: []string{`{LocalAppData}\JetBrains\*\caches`, `{LocalAppData}\JetBrains\*\index`,
 			`{LocalAppData}\JetBrains\*\log`, `{LocalAppData}\JetBrains\*\tmp`}},
 	{ID: "dev.game-engines", Category: Dev, Risk: Safe, Min: gb,
+		Action:  del("UnrealEditor.exe", "UE4Editor.exe", "Unity.exe"),
 		Folders: []string{`{LocalAppData}\UnrealEngine\Common\DerivedDataCache`, `{LocalAppData}\Unity\cache`, `{AppData}\Unity\Asset Store-5.x`}},
 	{ID: "dev.minikube", Category: Dev, Risk: Moderate, Min: gb,
 		Folders: []string{`{Profile}\.minikube`}},
@@ -147,17 +174,18 @@ var catalog = []Rule{
 		Folders: []string{`{Profile}\.cache\huggingface`}},
 	{ID: "ai.lmstudio", Category: AI, Risk: Manual, Min: gb,
 		Folders: []string{`{Profile}\.lmstudio\models`, `{Profile}\.cache\lm-studio`}},
-	{ID: "ai.torch", Category: AI, Risk: Safe, Min: 500 * mb,
+	{ID: "ai.torch", Category: AI, Risk: Safe, Min: 500 * mb, Action: del(),
 		Folders: []string{`{Profile}\.cache\torch`}},
-	{ID: "ai.chrome-model", Category: AI, Risk: Safe, Min: 500 * mb,
+	{ID: "ai.chrome-model", Category: AI, Risk: Safe, Min: 500 * mb, Action: del("chrome.exe"),
 		Folders: []string{`{LocalAppData}\Google\Chrome\User Data\OptGuideOnDeviceModel`}},
 
 	// Browsers.
-	{ID: "browsers.chrome-cache", Category: Browsers, Risk: Safe, Min: 200 * mb,
+	{ID: "browsers.chrome-cache", Category: Browsers, Risk: Safe, Min: 200 * mb, Action: del("chrome.exe"),
 		Folders: chromiumCaches(`{LocalAppData}\Google\Chrome\User Data`)},
-	{ID: "browsers.edge-cache", Category: Browsers, Risk: Safe, Min: 200 * mb,
+	{ID: "browsers.edge-cache", Category: Browsers, Risk: Safe, Min: 200 * mb, Action: del("msedge.exe"),
 		Folders: chromiumCaches(`{LocalAppData}\Microsoft\Edge\User Data`)},
 	{ID: "browsers.other-cache", Category: Browsers, Risk: Safe, Min: 200 * mb,
+		Action: del("brave.exe", "vivaldi.exe", "browser.exe", "opera.exe", "firefox.exe"),
 		Folders: concat(
 			chromiumCaches(`{LocalAppData}\BraveSoftware\Brave-Browser\User Data`),
 			chromiumCaches(`{LocalAppData}\Vivaldi\User Data`),
@@ -171,9 +199,10 @@ var catalog = []Rule{
 	// Mail, chat and cloud sync.
 	{ID: "apps.outlook", Category: Apps, Risk: Manual, Min: gb,
 		Folders: []string{`{LocalAppData}\Microsoft\Outlook`, `{Profile}\Documents\Outlook Files`}},
-	{ID: "apps.teams-cache", Category: Apps, Risk: Safe, Min: 300 * mb,
-		Folders: []string{`{LocalAppData}\Packages\MSTeams_8wekyb3d8bbwe\LocalCache`, `{AppData}\Microsoft\Teams`}},
+	{ID: "apps.teams-cache", Category: Apps, Risk: Safe, Min: 300 * mb, Action: del("ms-teams.exe", "Teams.exe"),
+		Folders: []string{`{LocalAppData}\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams`, `{AppData}\Microsoft\Teams`}},
 	{ID: "apps.chat-caches", Category: Apps, Risk: Safe, Min: 200 * mb,
+		Action:  del("slack.exe", "Discord.exe", "Zalo.exe", "Signal.exe"),
 		Folders: electronCaches(`{AppData}\Slack`, `{AppData}\discord`, `{AppData}\ZaloData`, `{AppData}\Signal`)},
 	{ID: "apps.chat-data", Category: Apps, Risk: Manual, Min: gb,
 		Folders: []string{`{AppData}\ZaloData`, `{AppData}\Telegram Desktop\tdata`, `{Profile}\Downloads\Telegram Desktop`,
@@ -182,11 +211,14 @@ var catalog = []Rule{
 		Folders: []string{`{Profile}\OneDrive*`, `{LocalAppData}\Google\DriveFS`, `{Profile}\Dropbox`, `{Profile}\iCloudDrive`}},
 	{ID: "apps.phone-backups", Category: Apps, Risk: Manual, Min: 500 * mb,
 		Folders: []string{`{AppData}\Apple Computer\MobileSync\Backup`, `{Profile}\Apple\MobileSync\Backup`}},
+	// No action: the cache can hold documents not yet uploaded, and only
+	// Office knows which.
 	{ID: "apps.office-cache", Category: Apps, Risk: Safe, Min: 300 * mb,
 		Folders: []string{`{LocalAppData}\Microsoft\Office\16.0\OfficeFileCache`}},
 
 	// Media and creative apps.
 	{ID: "media.editing-caches", Category: Media, Risk: Safe, Min: 500 * mb,
+		Action:  del("Adobe Premiere Pro.exe", "AfterFX.exe", "Adobe Media Encoder.exe", "Photoshop.exe", "CapCut.exe"),
 		Folders: []string{`{AppData}\Adobe\Common\Media Cache Files`, `{AppData}\Adobe\Common\Media Cache`, `{LocalAppData}\CapCut\User Data\Cache`},
 		Files:   []string{`{LocalAppData}\Temp\Photoshop Temp*`}},
 	{ID: "media.lightroom-previews", Category: Media, Risk: Manual, Min: gb,
@@ -203,6 +235,10 @@ var catalog = []Rule{
 			`{ProgramFiles}\Epic Games\*`, `{SystemDrive}\XboxGames\*`, `{SystemDrive}\Riot Games\*`, `{ProgramFiles}\EA Games\*`,
 			`{ProgramFilesX86}\Ubisoft\Ubisoft Game Launcher\games\*`}},
 	{ID: "games.leftovers", Category: Games, Risk: Safe, Min: 500 * mb,
+		Action: &Action{Kind: Delete, NeedsClosed: []string{"steam.exe", "EpicGamesLauncher.exe"},
+			Folders: []string{`{ProgramFilesX86}\Steam\steamapps\shadercache`, `{ProgramFilesX86}\Steam\steamapps\temp`,
+				`{ProgramFilesX86}\Steam\dumps`, `{ProgramFiles}\Steam\steamapps\shadercache`,
+				`{ProgramFilesX86}\Epic Games\Launcher\VaultCache`}},
 		Folders: []string{`{ProgramFilesX86}\Steam\steamapps\shadercache`, `{ProgramFilesX86}\Steam\steamapps\downloading`,
 			`{ProgramFilesX86}\Steam\steamapps\temp`, `{ProgramFilesX86}\Steam\dumps`, `{ProgramFiles}\Steam\steamapps\shadercache`,
 			`{ProgramFilesX86}\Epic Games\Launcher\VaultCache`}},
@@ -215,8 +251,9 @@ var catalog = []Rule{
 	{ID: "personal.media", Category: Personal, Risk: Manual, Min: 2 * gb,
 		Folders: []string{`{Profile}\Videos`, `{Profile}\Pictures`, `{Profile}\Music`}},
 	{ID: "personal.recycle-bin", Category: Personal, Risk: Safe, Min: 100 * mb,
+		Action:  &Action{Kind: EmptyRecycleBin},
 		Folders: []string{`{SystemDrive}\$Recycle.Bin`}},
-	{ID: "personal.temp", Category: Personal, Risk: Safe, Min: 300 * mb,
+	{ID: "personal.temp", Category: Personal, Risk: Safe, Min: 300 * mb, Action: &Action{Kind: Delete, MinAge: day},
 		Folders: []string{`{LocalAppData}\Temp`}},
 	{ID: "personal.other-accounts", Category: Personal, Risk: Manual, Min: gb, ItemMin: gb,
 		detect: otherAccounts, stage: late},
@@ -233,6 +270,10 @@ var catalog = []Rule{
 	{ID: "other.growth", Category: Other, Risk: Info, Min: anySize, noTotal: true,
 		detect: growth, stage: last},
 }
+
+// del is a Delete action for all of a rule's locations, with the programs
+// that must be closed first.
+func del(needsClosed ...string) *Action { return &Action{Kind: Delete, NeedsClosed: needsClosed} }
 
 // chromiumCaches are the cache folders of a Chromium-based browser, given its
 // User Data folder: per profile, plus the shared shader caches.

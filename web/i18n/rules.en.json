@@ -56,6 +56,7 @@
   "rule.system.logs.title": "System logs and traces",
   "rule.system.logs.what": "Logs of Windows servicing (CBS, DISM, setup), diagnostic traces and web server logs. They normally stay small; a runaway log can take many gigabytes.",
   "rule.system.logs.how": "Delete old .log, .cab and .etl files; Windows creates new ones as needed. For web server logs, set up log rotation.",
+  "rule.system.logs.action": "Only `.log` and `.cab` files older than a week, in the CBS and DISM folders.",
 
   "rule.system.temp.title": "Windows temporary files",
   "rule.system.temp.what": "Temporary files left by installers and Windows services.",
@@ -96,6 +97,7 @@
   "rule.updates.update-assistant.title": "Update Assistant leftovers",
   "rule.updates.update-assistant.what": "Downloads of the Windows Update Assistant and leftovers of \"Reset this PC\", often years old.",
   "rule.updates.update-assistant.how": "When no upgrade is in progress, delete $GetCurrent and $SysReset. Uninstalling \"Windows 10 Update Assistant\" in Apps removes Windows10Upgrade.",
+  "rule.updates.update-assistant.action": "Only `$GetCurrent` and `$SysReset`, when untouched for a week. `C:\\Windows10Upgrade` is an installed app: uninstall \"Windows 10 Update Assistant\" from Apps instead.",
 
   "rule.updates.download-cache.title": "Windows Update downloads",
   "rule.updates.download-cache.what": "Updates Windows has downloaded. They are only needed until they're installed.",
@@ -108,6 +110,7 @@
   "rule.drivers.installers.title": "Driver installer files",
   "rule.drivers.installers.what": "NVIDIA, AMD and Intel driver installers unpack about 1 GB for every update and leave it behind.",
   "rule.drivers.installers.how": "Delete the contents of these folders once the driver is installed; the installed driver doesn't need them.",
+  "rule.drivers.installers.action": "The folders go too; the next driver update creates them again.",
 
   "rule.drivers.oem-folders.title": "PC maker's driver folders",
   "rule.drivers.oem-folders.what": "Copies of drivers and recovery tools that your PC's manufacturer put on C:.",
@@ -140,6 +143,7 @@
   "rule.dev.pnpm.title": "pnpm cache and store",
   "rule.dev.pnpm.what": "pnpm-cache holds package metadata; the store holds every package version your projects have used.",
   "rule.dev.pnpm.how": "`pnpm store prune` removes the packages no project uses. The pnpm-cache folder can simply be deleted.",
+  "rule.dev.pnpm.action": "Only the metadata cache. The package store is shared with your projects through hard links: `pnpm store prune` removes what no project uses.",
 
   "rule.dev.yarn-bun.title": "Yarn and Bun caches",
   "rule.dev.yarn-bun.what": "Packages that Yarn and Bun have downloaded.",
@@ -164,6 +168,7 @@
   "rule.dev.gradle-maven.title": "Gradle and Maven caches",
   "rule.dev.gradle-maven.what": "Java and Android dependencies, and every Gradle version the wrapper has downloaded.",
   "rule.dev.gradle-maven.how": "Run `gradle --stop`, then delete the caches folder and old Gradle versions in wrapper\\dists. The Maven repository can be deleted too; both download again on demand.",
+  "rule.dev.gradle-maven.action": "Only Gradle's caches. Maven's repository can hold JARs installed by hand that no server has, so it is left to you.",
 
   "rule.dev.go.title": "Go caches",
   "rule.dev.go.what": "Go's build cache and module cache.",
@@ -200,6 +205,7 @@
   "rule.dev.editor-caches.title": "Code editor caches",
   "rule.dev.editor-caches.what": "Caches and logs of VS Code, Cursor and Windsurf.",
   "rule.dev.editor-caches.how": "Close the editor, then delete these folders; it rebuilds them.",
+  "rule.dev.editor-caches.action": "Only caches and logs: settings, extensions and workspaces stay.",
 
   "rule.dev.editor-workspaces.title": "Code editor workspace data",
   "rule.dev.editor-workspaces.what": "Data that VS Code-like editors keep per workspace, including extension state and AI chat history.",
@@ -244,14 +250,17 @@
   "rule.browsers.chrome-cache.title": "Google Chrome caches",
   "rule.browsers.chrome-cache.what": "Web page and code caches of every Chrome profile.",
   "rule.browsers.chrome-cache.how": "Close Chrome, then delete these folders, or clear \"Cached images and files\" in Chrome. Logins, history and settings stay.",
+  "rule.browsers.chrome-cache.action": "Only the caches: cookies, history, passwords and site data stay.",
 
   "rule.browsers.edge-cache.title": "Microsoft Edge caches",
   "rule.browsers.edge-cache.what": "Web page and code caches of every Edge profile.",
   "rule.browsers.edge-cache.how": "Close Edge, then delete these folders, or clear \"Cached images and files\" in Edge. Logins, history and settings stay.",
+  "rule.browsers.edge-cache.action": "Only the caches: cookies, history, passwords and site data stay.",
 
   "rule.browsers.other-cache.title": "Other browser caches",
   "rule.browsers.other-cache.what": "Caches of Brave, Vivaldi, Cốc Cốc, Opera and Firefox.",
   "rule.browsers.other-cache.how": "Close the browser, then delete these folders, or clear its cache in its settings.",
+  "rule.browsers.other-cache.action": "Only the caches: cookies, history, passwords and site data stay.",
 
   "rule.browsers.profile-data.title": "Browser profile data",
   "rule.browsers.profile-data.what": "Everything besides the caches: site data, offline data of web apps, extensions and history.",
@@ -268,6 +277,7 @@
   "rule.apps.chat-caches.title": "Chat app caches",
   "rule.apps.chat-caches.what": "The caches of Slack, Discord, Zalo and Signal.",
   "rule.apps.chat-caches.how": "Quit the app, then delete these cache folders. Only these: the rest of the app's folder holds chats and logins.",
+  "rule.apps.chat-caches.action": "Only the cache folders: chats and logins stay.",
 
   "rule.apps.chat-data.title": "Chat history and media",
   "rule.apps.chat-data.what": "Messages, photos, videos and files of Zalo, Telegram and WhatsApp stored on this PC.",
@@ -308,6 +318,7 @@
   "rule.games.leftovers.title": "Game launcher leftovers",
   "rule.games.leftovers.what": "Steam's shader cache, unfinished downloads and crash dumps, and Epic's Vault cache.",
   "rule.games.leftovers.how": "Delete these folders with the launcher closed; shader caches are rebuilt as you play.",
+  "rule.games.leftovers.action": "Downloads in progress (`steamapps\\downloading`) are left alone, so a paused download isn't lost.",
 
   "rule.personal.downloads.title": "Downloads",
   "rule.personal.downloads.what": "Installers, disk images, archives and videos downloaded over time.",

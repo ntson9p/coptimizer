@@ -79,5 +79,13 @@ export const api = {
   findings: (id) => call('GET', `/api/scans/${q(id)}/findings`),
   system: () => call('GET', '/api/system'),
   runProbe: (name) => call('POST', `/api/system/${q(name)}`),
+  // Cleanups: the page names only a finding; the server works out the rest.
+  plan: (ruleId) => call('POST', '/api/plans', { ruleId }),
+  startJob: (planId) => call('POST', '/api/jobs', { planId }),
+  jobs: () => call('GET', '/api/jobs'),
+  job: (id) => call('GET', `/api/jobs/${q(id)}`),
+  cancelJob: (id) => call('DELETE', `/api/jobs/${q(id)}`),
+  history: (limit) => call('GET', `/api/history?limit=${limit}`),
+  setConfig: (patch) => call('PUT', '/api/config', patch),
   shutdown: () => call('POST', '/api/shutdown'),
 };

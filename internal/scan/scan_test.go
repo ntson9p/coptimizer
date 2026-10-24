@@ -337,3 +337,50 @@ func TestRealFolderMatchesWalkDir(t *testing.T) {
 		t.Errorf("allocated %d is implausibly below size %d", res.Allocated, res.Size)
 	}
 }
+
+func TestRefreshMeasuresFoldersAgainInACopy(t *testing.T) {
+	f := memfs.New()
+	f.AddFile(`C:\Users\a\cache\big.bin`, 8<<20, t0)
+	f.AddFile(`C:\Users\a\cache\sub\small.bin`, 4096, t0)
+	f.AddFile(`C:\Users\a\NVIDIA\setup.exe`, 2<<20, t0)
+	f.AddFile(`C:\other.bin`, 1<<20, t0)
+	res := run(t, f, scan.Options{Roots: []string{`C:\`}})
+
+	tree, err := f.Open(`C:\Users\a\cache`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{`big.bin`, `sub\small.bin`, `sub`} {
+		if err := tree.Remove(rel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nvidia, _ := f.Open(`C:\Users\a\NVIDIA`)
+	nvidia.Remove("setup.exe")
+	users, _ := f.Open(`C:\Users\a`)
+	users.Remove("NVIDIA")
+
+	got, err := scan.Refresh(context.Background(), f, res, []string{`C:\Users\a\cache`, `C:\Users\a\NVIDIA`, `C:\not\scanned`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.Find(`C:\Users\a\cache`); n == nil || n.Allocated != 0 || len(n.Children) != 0 {
+		t.Errorf("cache after the refresh = %+v", n)
+	}
+	if got.Find(`C:\Users\a\NVIDIA`) != nil {
+		t.Error("a folder that is gone is still in the result")
+	}
+	if got.Allocated != 1<<20 || got.Roots[0].Allocated != 1<<20 || got.Find(`C:\Users`).Allocated != 0 {
+		t.Errorf("totals after the refresh: %d, %d", got.Allocated, got.Find(`C:\Users`).Allocated)
+	}
+	if len(got.Largest) != 1 || got.Largest[0].Path != `C:\other.bin` {
+		t.Errorf("largest = %+v", got.Largest)
+	}
+	// The original is untouched.
+	if res.Find(`C:\Users\a\cache`).Allocated != 8<<20+4096 || res.Find(`C:\Users\a\NVIDIA`) == nil || len(res.Largest) != 4 {
+		t.Error("Refresh changed the result it was given")
+	}
+	if p := got.Find(`C:\Users\a\cache`).Parent; p != got.Find(`C:\Users\a`) {
+		t.Error("parent links point into the old result")
+	}
+}

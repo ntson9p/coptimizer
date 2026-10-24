@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ntson9p/coptimizer/internal/actions"
 	"github.com/ntson9p/coptimizer/internal/fsx"
 	"github.com/ntson9p/coptimizer/internal/probe"
 	"github.com/ntson9p/coptimizer/internal/rules"
@@ -36,6 +37,9 @@ type Config struct {
 	Env        rules.Env     // where Windows keeps things, for the findings
 	Snapshots  SnapshotStore // earlier scans, for growth; nil: none kept
 	Probes     *probe.Deps   // for the system information; nil: none
+	Actions    *actions.Deps // for cleanups; nil: none
+	History    HistoryStore  // the record of past cleanups; nil: kept in memory only
+	Simulate   bool          // start in simulation mode: cleanups only show what they would do
 	Web        fs.FS         // the web page; index.html at the top
 	Logf       func(format string, args ...any)
 	Shutdown   func()           // called when the page asks the server to stop
@@ -49,6 +53,7 @@ type Server struct {
 	sessions *sessions
 	hub      *hub
 	scans    *scans
+	jobs     *jobs
 	probes   *probe.Manager // nil without Config.Probes
 	handler  http.Handler
 }
@@ -69,6 +74,7 @@ func New(cfg Config) *Server {
 		}
 	}
 	s.scans = newScans(cfg, s.hub)
+	s.jobs = newJobs(cfg, s.scans, s.hub)
 	if cfg.LaunchCode != "" {
 		s.sessions.addCode(cfg.LaunchCode)
 	}
@@ -92,6 +98,14 @@ func New(cfg Config) *Server {
 	mux.Handle("GET /api/scans/{id}/findings", s.api(s.findings, true))
 	mux.Handle("GET /api/system", s.api(s.system, true))
 	mux.Handle("POST /api/system/{name}", s.api(s.runProbe, true))
+	mux.Handle("POST /api/plans", s.api(s.createPlan, true))
+	mux.Handle("POST /api/jobs", s.api(s.startJob, true))
+	mux.Handle("GET /api/jobs", s.api(s.listJobs, true))
+	mux.Handle("GET /api/jobs/{id}", s.api(s.getJob, true))
+	mux.Handle("DELETE /api/jobs/{id}", s.api(s.cancelJob, true))
+	mux.Handle("GET /api/history", s.api(s.history, true))
+	mux.Handle("GET /api/config", s.api(s.getConfig, true))
+	mux.Handle("PUT /api/config", s.api(s.putConfig, true))
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.Handle("POST /api/shutdown", s.api(s.shutdown, true))
 	mux.Handle("GET /api/", s.api(func(*http.Request) (any, error) {
@@ -111,10 +125,11 @@ func (s *Server) Link(code string) string {
 // NewLaunchLink makes another one-time code and returns the link using it.
 func (s *Server) NewLaunchLink() string { return s.Link(s.sessions.newCode()) }
 
-// Close stops a running scan and running probes, and ends open event
+// Close stops a running scan, cleanup and probes, and ends open event
 // streams.
 func (s *Server) Close() {
 	s.scans.cancelAll()
+	s.jobs.close()
 	if s.probes != nil {
 		s.probes.Close()
 	}
@@ -216,12 +231,17 @@ type statusView struct {
 	Elevated bool      `json:"elevated"`
 	User     string    `json:"user"`
 	LastScan *scanView `json:"lastScan"`
+	Simulate bool      `json:"simulate"` // cleanups only show what they would do
+	Cleanups bool      `json:"cleanups"` // cleanups are available
+	Busy     bool      `json:"busy"`     // a cleanup is queued or running
 }
 
 func (s *Server) status(*http.Request) (any, error) { return s.statusValue(), nil }
 
 func (s *Server) statusValue() statusView {
-	return statusView{Version: s.cfg.Version, Demo: s.cfg.Demo, Elevated: s.cfg.System.Elevated(), User: s.user, LastScan: s.scans.latest()}
+	c := s.jobs.config()
+	return statusView{Version: s.cfg.Version, Demo: s.cfg.Demo, Elevated: s.cfg.System.Elevated(), User: s.user, LastScan: s.scans.latest(),
+		Simulate: c.Simulate, Cleanups: c.Cleanups, Busy: s.jobs.busy()}
 }
 
 type driveView struct {
@@ -415,11 +435,59 @@ func (s *Server) runProbe(r *http.Request) (any, error) {
 }
 
 func (s *Server) shutdown(*http.Request) (any, error) {
+	if s.jobs.busy() {
+		return nil, &apiError{Status: 409, Code: "busy", Message: "a cleanup is running; wait for it to finish first"}
+	}
 	if s.cfg.Shutdown != nil {
 		// Let this response reach the page first.
 		time.AfterFunc(200*time.Millisecond, s.cfg.Shutdown)
 	}
 	return map[string]bool{"ok": true}, nil
+}
+
+func (s *Server) createPlan(r *http.Request) (any, error) {
+	var req struct {
+		RuleID string `json:"ruleId"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return nil, err
+	}
+	return s.jobs.prepare(r.Context(), req.RuleID)
+}
+
+func (s *Server) startJob(r *http.Request) (any, error) {
+	var req struct {
+		PlanID string `json:"planId"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return nil, err
+	}
+	return s.jobs.start(req.PlanID)
+}
+
+func (s *Server) listJobs(*http.Request) (any, error) { return s.jobs.list(), nil }
+
+func (s *Server) getJob(r *http.Request) (any, error) { return s.jobs.get(r.PathValue("id")) }
+
+func (s *Server) cancelJob(r *http.Request) (any, error) { return s.jobs.cancel(r.PathValue("id")) }
+
+func (s *Server) history(r *http.Request) (any, error) {
+	return s.jobs.history.Recent(intParam(r, "limit", 100, 1000))
+}
+
+func (s *Server) getConfig(*http.Request) (any, error) { return s.jobs.config(), nil }
+
+func (s *Server) putConfig(r *http.Request) (any, error) {
+	var req struct {
+		Simulate *bool `json:"simulate"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Simulate != nil {
+		s.jobs.setSimulate(*req.Simulate)
+	}
+	return s.jobs.config(), nil
 }
 
 // events streams server-sent events: a hello with the current status, any

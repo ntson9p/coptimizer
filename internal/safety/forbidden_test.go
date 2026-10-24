@@ -22,16 +22,27 @@ var allowed = map[string][]string{
 	"internal/testguard/testguard.go": {"golang.org/x/sys/windows"},
 	// Lists folders, read-only (FILE_LIST_DIRECTORY); never opens files.
 	"internal/winfs/list_windows.go": {"golang.org/x/sys/windows"},
+	// The deleter's real file system: opens each folder as an os.Root, which
+	// refuses paths through junctions; every deletion is guarded by
+	// safety.GuardDelete.
+	"internal/winfs/clean_windows.go": {"golang.org/x/sys/windows", "os.OpenRoot"},
 	// Enables SeBackupPrivilege (read access) in this process only.
 	"internal/winfs/privilege_windows.go": {"golang.org/x/sys/windows"},
-	// Reads drive sizes and the process token.
-	"internal/sysinfo/sysinfo_windows.go": {"golang.org/x/sys/windows"},
+	// Reads drive sizes, the process token, the names of running programs
+	// and the Recycle Bin's size.
+	"internal/sysinfo/sysinfo_windows.go": {"golang.org/x/sys/windows", "unsafe"},
+	// Empties the Recycle Bin through the shell; guarded by
+	// safety.GuardSystemChange.
+	"internal/sysinfo/mutator_windows.go": {"golang.org/x/sys/windows", "unsafe"},
 	// Starts the elevated server and opens the browser; guarded by
 	// safety.GuardShellOpen.
 	"cmd/coptimizer/shell_windows.go": {"golang.org/x/sys/windows"},
 	// Saves scan snapshots in the app's data folder; guarded by
 	// safety.GuardWrite and GuardDelete.
 	"internal/store/store.go": {"os.MkdirAll", "os.Remove", "os.Rename", "os.WriteFile"},
+	// Appends to the cleanup history in the app's data folder; guarded by
+	// safety.GuardWrite.
+	"internal/store/history.go": {"os.MkdirAll", "os.OpenFile"},
 	// Runs programs, guarded by safety.GuardRun, inside a job object.
 	"internal/execx/real_windows.go": {"golang.org/x/sys/windows", "os/exec", "syscall", "unsafe"},
 	// Reads the registry: keys are opened with query and enumerate rights only.
@@ -42,6 +53,7 @@ var allowed = map[string][]string{
 	// Test helpers; every change is checked by safety.GuardWrite or GuardDelete first.
 	"internal/sandbox/sandbox.go":          {"os.Link", "os.MkdirAll", "os.WriteFile"},
 	"internal/sandbox/junction_windows.go": {"golang.org/x/sys/windows", "os.Mkdir", "os.Remove"},
+	"internal/sandbox/attrs_windows.go":    {"golang.org/x/sys/windows"},
 }
 
 // Functions of package os that create, change or delete files or start

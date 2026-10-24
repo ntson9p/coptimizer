@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/ntson9p/coptimizer/internal/actions"
 	"github.com/ntson9p/coptimizer/internal/demo"
 	"github.com/ntson9p/coptimizer/internal/rules"
 	"github.com/ntson9p/coptimizer/internal/scan"
@@ -44,6 +45,7 @@ func TestDemoMachineShowsEveryKindOfFinding(t *testing.T) {
 	for _, id := range []string{
 		"system.hiberfil", "system.pagefile", "system.restore-points", "system.component-store", "system.windows",
 		"system.programs", "system.error-reports", "system.shader-caches", "updates.update-assistant",
+		"updates.delivery-optimization",
 		"virtual.wsl", "dev.npm-cache", "dev.pnpm", "dev.browser-testing", "dev.node-modules",
 		"dev.editor-caches", "dev.editor-workspaces", "dev.editor-extensions", "browsers.chrome-cache",
 		"browsers.profile-data", "apps.teams-cache", "media.recordings", "games.installed",
@@ -54,5 +56,34 @@ func TestDemoMachineShowsEveryKindOfFinding(t *testing.T) {
 		if !got[id] {
 			t.Errorf("the demo shows no %s finding", id)
 		}
+	}
+}
+
+// TestDemoCleanupsFreeSpace cleans the simulated npm cache and empties the
+// simulated Recycle Bin: the drive gains exactly what was deleted.
+func TestDemoCleanupsFreeSpace(t *testing.T) {
+	m := demo.New(0)
+	res, err := scan.Run(context.Background(), m.FS, scan.Options{Roots: []string{`C:\`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := rules.Evaluate(res, m.Env, rules.Options{})
+	before, _ := m.System.Drives()
+	var freed int64
+	for _, id := range []string{"dev.npm-cache", "personal.recycle-bin"} {
+		f, _ := rep.Find(id)
+		p, err := actions.Prepare(context.Background(), m.Actions, rep, f)
+		if err != nil || p.Blocked != "" || p.Bytes == 0 {
+			t.Fatalf("%s: plan %+v, %v", id, p, err)
+		}
+		o := actions.Run(context.Background(), m.Actions, p, false, func(actions.Progress) {}, func(string) {})
+		if o.State != actions.Succeeded {
+			t.Fatalf("%s: %+v", id, o)
+		}
+		freed += p.Bytes
+	}
+	after, _ := m.System.Drives()
+	if got := after[0].Free - before[0].Free; got != freed {
+		t.Errorf("C: gained %d bytes; the cleanups deleted %d", got, freed)
 	}
 }

@@ -16,15 +16,17 @@ const shots = path.join(repo, '.tmp', 'e2e');
 let server;
 let link;
 let browser;
+let output = '';
 
 before(async () => {
   mkdirSync(shots, { recursive: true });
   server = spawn(path.join(repo, 'dist', 'coptimizer.exe'), ['-demo', '-no-browser'], { stdio: ['pipe', 'pipe', 'inherit'] });
+  server.stdout.on('data', (chunk) => {
+    output += chunk;
+  });
   link = await new Promise((resolve, reject) => {
-    let out = '';
-    server.stdout.on('data', (chunk) => {
-      out += chunk;
-      const m = /One-time link: (\S+)/.exec(out);
+    server.stdout.on('data', () => {
+      const m = /One-time link: (\S+)/.exec(output);
       if (m) resolve(m[1]);
     });
     server.on('exit', (code) => reject(new Error(`the server exited with code ${code}`)));
@@ -38,6 +40,24 @@ after(async () => {
   await browser?.close();
   server?.kill();
 });
+
+// newLink asks the server's console for another one-time link, as typing L
+// in its window does.
+async function newLink() {
+  const seen = output.length;
+  server.stdin.write('l\n');
+  for (let i = 0; i < 100; i++) {
+    const m = /New one-time link: (\S+)/.exec(output.slice(seen));
+    if (m) return m[1];
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('the server printed no new link');
+}
+
+// tab is a link of the navigation bar.
+function tab(page, name) {
+  return page.locator('#tabs').getByRole('link', { name, exact: true });
+}
 
 function watchForErrors(page) {
   const errors = [];
@@ -119,6 +139,86 @@ test('scan the demo PC and explore the result', async () => {
   await page.getByRole('heading', { name: 'Biggest findings' }).waitFor();
   assert.match(await page.locator('.reclaim').innerText(), /Safe to clean: \d/);
   await page.screenshot({ path: path.join(shots, '8-overview-findings.png'), fullPage: true });
+
+  assert.deepEqual(errors, [], 'the page logged errors');
+  await page.close();
+});
+
+test('clean up the demo PC, preview first', async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const errors = watchForErrors(page);
+  await page.goto(await newLink());
+  await page.locator('#conn', { hasText: 'Live' }).waitFor();
+  await tab(page, 'Findings').click();
+  const dialog = page.locator('dialog.cleanup');
+
+  // The npm cache: a preview that changes nothing, then the real cleanup.
+  const npm = page.locator('article[data-id="dev.npm-cache"]');
+  await npm.getByRole('button', { name: 'Clean up…' }).click();
+  await dialog.getByText(/Deletes [\d,]+ files/).waitFor({ timeout: 30000 });
+  assert.match(await dialog.innerText(), /npm-cache/);
+  await page.screenshot({ path: path.join(shots, '9-preview.png') });
+  await dialog.getByRole('button', { name: 'Delete these files' }).click();
+  await dialog.getByText(/Done: .* more free space/).waitFor({ timeout: 60000 });
+  await page.screenshot({ path: path.join(shots, '10-cleaned.png') });
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  // Its folder is measured again, and the finding goes.
+  await npm.waitFor({ state: 'detached', timeout: 30000 });
+
+  // VS Code's caches wait until VS Code is closed (the demo closes it soon).
+  const editor = page.locator('article[data-id="dev.editor-caches"]');
+  await editor.getByRole('button', { name: 'Clean up…' }).click();
+  await dialog.getByText('Close Visual Studio Code first, then check again.').waitFor({ timeout: 30000 });
+  assert.equal(await dialog.getByRole('button', { name: 'Delete these files' }).isDisabled(), true);
+  await page.screenshot({ path: path.join(shots, '11-close-first.png') });
+  await page.waitForTimeout(3200);
+  await dialog.getByRole('button', { name: 'Check again' }).click();
+  await dialog.getByRole('button', { name: 'Delete these files' }).and(page.locator(':enabled')).waitFor({ timeout: 30000 });
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+  // Simulation mode: the same cleanup only says what it would do.
+  await tab(page, 'Activity').click();
+  await page.getByLabel('Simulation mode').check();
+  await page.locator('#simulate', { hasText: 'Simulation' }).waitFor();
+  await tab(page, 'Findings').click();
+  await editor.getByRole('button', { name: 'Clean up…' }).click();
+  await dialog.getByText(/Simulation mode is on/).waitFor({ timeout: 30000 });
+  await dialog.getByRole('button', { name: 'Simulate' }).click();
+  await dialog.getByText(/Simulation finished: .* would have been deleted/).waitFor({ timeout: 60000 });
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await tab(page, 'Activity').click();
+  await page.getByLabel('Simulation mode').uncheck();
+  await page.locator('#simulate').waitFor({ state: 'hidden' });
+  await tab(page, 'Findings').click();
+  assert.equal(await editor.count(), 1, 'a simulation must not clean anything');
+
+  // The Recycle Bin, emptied through Windows (simulated here).
+  await page.locator('article[data-id="personal.recycle-bin"]').getByRole('button', { name: 'Empty the Recycle Bin…' }).click();
+  await dialog.getByText(/Empties your Recycle Bin on C:, with 40 items/).waitFor({ timeout: 30000 });
+  await dialog.getByRole('button', { name: 'Empty the Recycle Bin' }).click();
+  await dialog.getByText(/the Recycle Bin is empty/).waitFor({ timeout: 30000 });
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  // DISM's cleanup: the exact command, no way to stop it, live progress.
+  await page.locator('article[data-id="system.component-store"]').getByRole('button', { name: 'Clean up with DISM…' }).click();
+  await dialog.locator('pre.command', { hasText: 'dism.exe /Online /English /Cleanup-Image /StartComponentCleanup' }).waitFor({ timeout: 30000 });
+  await dialog.getByRole('button', { name: 'Run the cleanup' }).click();
+  await dialog.getByText("This can't be stopped safely once it has started.").waitFor();
+  assert.equal(await dialog.getByRole('button', { name: 'Stop' }).count(), 0);
+  await page.screenshot({ path: path.join(shots, '12-dism.png') });
+  await dialog.getByText(/Done: .* more free space/).waitFor({ timeout: 30000 });
+  await dialog.getByText(/Scan C: again/).waitFor();
+  await dialog.getByRole('link', { name: 'See Activity' }).click();
+
+  // Activity: this session's cleanups and the history.
+  await page.getByRole('heading', { name: 'Activity' }).waitFor();
+  await page.locator('.job-list .job').nth(3).waitFor();
+  const history = page.locator('.table.history');
+  await history.locator('.row:not(.head)').nth(3).waitFor();
+  assert.match(await history.innerText(), /npm cache/i);
+  assert.match(await history.innerText(), /Simulation/);
+  assert.match(await page.locator('.card', { hasText: 'History' }).innerText(), /freed in total by 3 cleanups/);
+  await page.screenshot({ path: path.join(shots, '13-activity.png'), fullPage: true });
 
   assert.deepEqual(errors, [], 'the page logged errors');
   await page.close();

@@ -10,6 +10,20 @@ export async function loadStrings(lang) {
   strings = Object.assign({}, ...parts);
 }
 
+const plurals = new Intl.PluralRules('en');
+const numbers = new Intl.NumberFormat('en');
+
+// n returns a count with its noun, like "1 file" or "9,000 files", from the
+// texts unit.<unit>.one and unit.<unit>.other.
+export function n(value, unit) {
+  return t(`unit.${unit}.${plurals.select(value) === 'one' ? 'one' : 'other'}`, { count: numbers.format(value) });
+}
+
+// has reports whether there is a text for key.
+export function has(key) {
+  return key in strings;
+}
+
 // t returns the text for key, with {name} placeholders filled from vars.
 export function t(key, vars = {}) {
   const s = strings[key] ?? key;

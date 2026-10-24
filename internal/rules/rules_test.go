@@ -350,12 +350,18 @@ func TestEveryRuleHasTexts(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]bool{}
+	optional := map[string]bool{} // notes the cleanup preview shows, for rules with an action
+	kinds := map[rules.ActionKind]bool{}
 	for _, r := range rules.Rules() {
 		for _, k := range []string{"title", "what", "how"} {
 			want["rule."+r.ID+"."+k] = true
 		}
 		want["category."+string(r.Category)] = true
 		want["risk."+string(r.Risk)] = true
+		if r.Action != nil {
+			optional["rule."+r.ID+".action"] = true
+			kinds[r.Action.Kind] = true
+		}
 	}
 	for k := range want {
 		if strings.TrimSpace(texts[k]) == "" {
@@ -363,8 +369,25 @@ func TestEveryRuleHasTexts(t *testing.T) {
 		}
 	}
 	for k := range texts {
-		if !want[k] {
+		if !want[k] && !optional[k] {
 			t.Errorf("rules.en.json has %s, which no rule uses", k)
+		}
+	}
+
+	// Every kind of action needs the page's texts for its button and preview.
+	data, err = web.Files.ReadFile("i18n/en.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page map[string]string
+	if err := json.Unmarshal(data, &page); err != nil {
+		t.Fatal(err)
+	}
+	for kind := range kinds {
+		for _, k := range []string{"button", "title", "summary", "confirm"} {
+			if strings.TrimSpace(page["action."+string(kind)+"."+k]) == "" {
+				t.Errorf("en.json has no text for action.%s.%s", kind, k)
+			}
 		}
 	}
 }

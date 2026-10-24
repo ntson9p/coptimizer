@@ -158,7 +158,7 @@ More apps ship on-device models every year; the app's "unrecognized big folder" 
 | What | Where | Typical size | How to reclaim | Tier |
 |---|---|---|---|---|
 | Outlook (classic) offline mailbox | `%LOCALAPPDATA%\Microsoft\Outlook\*.ost`; archives `Documents\Outlook Files\*.pst` | 2–50 GB | Lower "Mail to keep offline" in the account settings; keep PST archives on another drive | Manual |
-| Microsoft Teams | new Teams `%LOCALAPPDATA%\Packages\MSTeams_8wekyb3d8bbwe\LocalCache`; classic `%APPDATA%\Microsoft\Teams` | 0.5–5 GB | Clear the cache with Teams closed (Settings → Apps → Teams → Reset also works) | Safe |
+| Microsoft Teams | new Teams `%LOCALAPPDATA%\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams`; classic `%APPDATA%\Microsoft\Teams` | 0.5–5 GB | Clear the cache with Teams closed (Settings → Apps → Teams → Reset also works) | Safe |
 | Electron chat apps (Slack, Discord, Zalo, Messenger, Skype) | `%APPDATA%\<app>\{Cache,Code Cache,GPUCache,DawnCache}`, e.g. `%APPDATA%\ZaloData\Cache` | 0.2–5 GB | Delete only these cache folders, with the app closed. The rest of the folder holds chat data and logins | Safe |
 | Chat media and history | Zalo `%APPDATA%\ZaloData`; Telegram `%USERPROFILE%\Downloads\Telegram Desktop` and `%APPDATA%\Telegram Desktop\tdata`; WhatsApp `%LOCALAPPDATA%\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalState` | 1–50 GB | Use each app's own storage manager (Telegram: Settings → Advanced → Manage local storage, which also sets a size limit) | Manual |
 | OneDrive | `%USERPROFILE%\OneDrive*`: files set to "Always keep on this device" | 0–1000 GB | Right-click → "Free up space" (keeps them online-only) | Manual |
@@ -240,3 +240,4 @@ Found by hand before the app existed: npm cache 9.0 GB, `C:\$GetCurrent` 3.8 GB 
 3. Explorer-style totals for `WinSxS` (16.5 GB here) are inflated by hard links. Use DISM's own analysis, and count each hard-linked file once.
 4. Tool output comes in different encodings (`wsl.exe` writes UTF-16), and many tools translate their output into the Windows display language. Read APIs, the registry or JSON, never translated text.
 5. Advice must name the right command: `pnpm store prune` cleans pnpm's package store, not the `pnpm-cache` metadata folder. Every rule needs its own accurate fix.
+6. Caches contain links. Found later by COptimizer's own cleanup preview: the `pnpm-cache\dlx` folder held 1,490 junctions, some leading into pnpm's package store, which projects share through hard links. A cleaner that followed them would delete the store from under those projects. COptimizer's deleter never enters a junction.

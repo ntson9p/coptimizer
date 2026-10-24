@@ -1,24 +1,30 @@
 // Package demo builds the simulated PC behind demo mode and the UI tests: an
 // in-memory C: drive shaped like a real developer machine (the manual scan in
 // docs/space-hogs.md, section 5), two data drives, a made-up earlier scan to
-// show growth, and simulated answers for the system information. Nothing here
-// touches the real system.
+// show growth, simulated answers for the system information, and cleanups
+// that delete from the in-memory drive. Nothing here touches the real system.
 package demo
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ntson9p/coptimizer/internal/actions"
 	"github.com/ntson9p/coptimizer/internal/execx"
 	"github.com/ntson9p/coptimizer/internal/fsx"
 	"github.com/ntson9p/coptimizer/internal/fsx/memfs"
 	"github.com/ntson9p/coptimizer/internal/probe"
 	"github.com/ntson9p/coptimizer/internal/rules"
+	"github.com/ntson9p/coptimizer/internal/safety"
 	"github.com/ntson9p/coptimizer/internal/scan"
+	"github.com/ntson9p/coptimizer/internal/store"
 	"github.com/ntson9p/coptimizer/internal/sysinfo"
 )
 
@@ -34,14 +40,27 @@ type Machine struct {
 	Env       rules.Env
 	Snapshots *Snapshots
 	Probes    probe.Deps
+	Actions   actions.Deps
+	History   *store.MemoryHistory
 }
 
-// System is the simulated machine's drives. Demo mode never claims
-// Administrator rights for itself.
-type System struct{ drives []sysinfo.Drive }
+// System is the simulated machine's drives, which gain the space cleanups
+// free. Demo mode never claims Administrator rights for itself; its cleanups
+// act as if it had them.
+type System struct {
+	fs     *memfs.FS
+	drives []sysinfo.Drive
+}
 
-func (s System) Drives() ([]sysinfo.Drive, error) { return s.drives, nil }
-func (System) Elevated() bool                     { return false }
+func (s System) Drives() ([]sysinfo.Drive, error) {
+	out := slices.Clone(s.drives)
+	for i := range out {
+		out[i].Free += s.fs.Freed(out[i].Root[:2])
+	}
+	return out, nil
+}
+
+func (System) Elevated() bool { return false }
 
 // blob is a folder filled with generated files.
 type blob struct {
@@ -57,6 +76,8 @@ const (
 	local = user + `\AppData\Local`
 	roam  = user + `\AppData\Roaming`
 	wslVM = local + `\wsl\{4c8a0e4f-6b1d-4d55-9a8e-2f3a6c1b7d90}`
+	bin   = `C:\$Recycle.Bin\S-1-5-21-1004336348-1177238915-682003330-1001`
+	doDir = `C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache`
 )
 
 var blobs = []blob{
@@ -73,7 +94,8 @@ var blobs = []blob{
 	{`C:\Program Files (x86)\Steam\steamapps\shadercache`, 300 * mb, 200, 4, []string{""}},
 	{`C:\ProgramData`, 1_040 * mb, 1500, 80, []string{".dat", ".log", ".db"}},
 	{`C:\$GetCurrent\media`, 3_810 * mb, 40, 3, []string{".esd", ".wim", ".dll"}},
-	{`C:\$Recycle.Bin\S-1-5-21-1004336348-1177238915-682003330-1001`, 1_200 * mb, 40, 0, []string{".zip", ".mp4", ".docx"}},
+	{bin, 1_200 * mb, 40, 0, []string{".zip", ".mp4", ".docx"}},
+	{doDir, 640 * mb, 60, 6, []string{""}},
 	{`C:\GameData\Levels`, 3_100 * mb, 120, 6, []string{".pak"}},
 	{local + `\npm-cache\_cacache`, 9_050 * mb, 9000, 256, []string{""}},
 	{local + `\Google\Chrome\User Data\Default\Cache\Cache_Data`, 1_650 * mb, 3000, 0, []string{""}},
@@ -90,7 +112,7 @@ var blobs = []blob{
 	{local + `\Temp`, 650 * mb, 900, 30, []string{".tmp", ".log", ".msi", ""}},
 	{local + `\CrashDumps`, 900 * mb, 6, 0, []string{".dmp"}},
 	{local + `\D3DSCache`, 450 * mb, 300, 12, []string{""}},
-	{local + `\Packages\MSTeams_8wekyb3d8bbwe\LocalCache`, 800 * mb, 700, 20, []string{""}},
+	{local + `\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams`, 800 * mb, 700, 20, []string{""}},
 	{local + `\VendorSync\VideoCache`, 2_600 * mb, 400, 10, []string{".chunk"}},
 	{roam + `\Code\Cache\Cache_Data`, 600 * mb, 1500, 0, []string{""}},
 	{roam + `\Code\CachedData`, 700 * mb, 900, 8, []string{".js", ".map"}},
@@ -158,7 +180,7 @@ func New(delay time.Duration) *Machine {
 
 	m := &Machine{
 		FS: f,
-		System: System{drives: []sysinfo.Drive{
+		System: System{fs: f, drives: []sysinfo.Drive{
 			{Root: `C:\`, Label: "", FS: "NTFS", Total: 118_642_237_440, Free: 7_900_000_000},
 			{Root: `D:\`, Label: "Data", FS: "NTFS", Total: 500_096_983_040, Free: 115_200_000_000},
 			{Root: `E:\`, Label: "Storage", FS: "NTFS", Total: 500_104_687_616, Free: 79_500_000_000},
@@ -166,9 +188,125 @@ func New(delay time.Duration) *Machine {
 		Env:       rules.DefaultEnv("Demo"),
 		Snapshots: &Snapshots{all: []rules.Snapshot{earlierScan(f)}},
 		Probes:    probes(),
+		History:   &store.MemoryHistory{},
 	}
+	m.Actions = cleanups(f, m.Env)
 	f.SetDelay(delay)
 	return m
+}
+
+// cleanups are the demo's cleanup actions: they delete from the in-memory
+// drive, as if with Administrator rights. The simulated VS Code is running
+// at first, to show how a cleanup waits for a program to close; it "closes"
+// a few seconds after a preview asked for it.
+func cleanups(f *memfs.FS, env rules.Env) actions.Deps {
+	policy, err := safety.NewPolicy(safety.Places{SystemDrive: env.SystemDrive, Windows: env.Windows,
+		ProgramData: env.ProgramData, ProgramFiles: env.ProgramFiles, ProgramFilesX86: env.ProgramFilesX86, Users: env.Users})
+	if err != nil {
+		panic(err) // can't happen: the places are fixed
+	}
+	return actions.Deps{
+		Cleaner: f, Policy: policy, Programs: &programs{}, RecycleBin: recycleBin{f}, Mutator: recycleBin{f},
+		Runner: &execx.Fake{Respond: tools(f)}, Elevated: true, Env: env, Now: time.Now,
+	}
+}
+
+// programs is what runs on the demo PC.
+type programs struct {
+	mu     sync.Mutex
+	closes time.Time // when the simulated VS Code closes; zero until asked
+}
+
+func (p *programs) Running() ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closes.IsZero() {
+		p.closes = time.Now().Add(3 * time.Second)
+	}
+	if time.Now().Before(p.closes) {
+		return []string{"explorer.exe", "Code.exe"}, nil
+	}
+	return []string{"explorer.exe"}, nil
+}
+
+// recycleBin is the demo user's Recycle Bin on C:.
+type recycleBin struct{ fs *memfs.FS }
+
+func (b recycleBin) RecycleBin(string) (bytes, items int64, err error) {
+	entries, err := b.fs.List(bin)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, 0, nil
+	}
+	for _, e := range entries {
+		bytes += e.Allocated
+	}
+	return bytes, int64(len(entries)), err
+}
+
+func (b recycleBin) EmptyRecycleBin(string) error { return removeAll(b.fs, bin) }
+
+// removeAll deletes what is in dir and its sub-folders, keeping dir.
+func removeAll(f *memfs.FS, dir string) error {
+	tree, err := f.Open(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var walk func(rel string) error
+	walk = func(rel string) error {
+		entries, err := tree.List(rel)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			name := e.Name
+			if rel != "" {
+				name = rel + `\` + name
+			}
+			if e.IsDir() {
+				if err := walk(name); err != nil {
+					return err
+				}
+			}
+			if err := tree.Remove(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk("")
+}
+
+// tools imitates the Windows tools cleanups run: DISM's component cleanup,
+// which draws a progress bar for a few seconds and frees part of WinSxS, and
+// the deletion of the Delivery Optimization cache.
+func tools(f *memfs.FS) func(ctx context.Context, c execx.Cmd) (execx.Result, error) {
+	return func(ctx context.Context, c execx.Cmd) (execx.Result, error) {
+		say := func(line string) {
+			if c.Output != nil {
+				c.Output(line)
+			}
+		}
+		if slices.Contains(c.Args, "/StartComponentCleanup") {
+			say("Deployment Image Servicing and Management tool")
+			for i := 0; i <= 10; i++ {
+				select {
+				case <-time.After(300 * time.Millisecond):
+				case <-ctx.Done():
+					return execx.Result{}, ctx.Err()
+				}
+				say(fmt.Sprintf("[%s%5.1f%%%s]", strings.Repeat("=", 2*i), float64(10*i), strings.Repeat(" ", 20-2*i)))
+			}
+			for i := range 40 {
+				removeAll(f, fmt.Sprintf(`C:\Windows\WinSxS\%02x`, i))
+			}
+			say("The operation completed successfully.")
+			return execx.Result{}, nil
+		}
+		return execx.Result{}, removeAll(f, doDir)
+	}
 }
 
 // fill adds b.files files totalling about b.total bytes.

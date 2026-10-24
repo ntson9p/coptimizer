@@ -1,6 +1,6 @@
-// Package memfs is an in-memory fsx.Lister for tests and demo mode. Paths are
-// absolute Windows paths such as `C:\Users\demo`; names compare without
-// regard to case, like on NTFS.
+// Package memfs is an in-memory fsx.Lister and fsx.Cleaner for tests and demo
+// mode. Paths are absolute Windows paths such as `C:\Users\demo`; names
+// compare without regard to case, like on NTFS.
 package memfs
 
 import (
@@ -23,6 +23,10 @@ type FS struct {
 	nextID uint64
 	delay  time.Duration
 	lists  map[string]int // upper-case path → how often it was listed
+
+	locked   map[string]bool  // upper-case paths that can't be removed: in use
+	noDelete map[string]bool  // upper-case paths that can't be removed: no permission
+	freed    map[string]int64 // "C:" → bytes on disk removed
 }
 
 type folder struct {
@@ -33,7 +37,8 @@ type folder struct {
 
 // New returns an empty file system.
 func New() *FS {
-	return &FS{drives: make(map[string]*folder), lists: make(map[string]int)}
+	return &FS{drives: make(map[string]*folder), lists: make(map[string]int),
+		locked: make(map[string]bool), noDelete: make(map[string]bool), freed: make(map[string]int64)}
 }
 
 // SetDelay makes every List call take d, to imitate a real disk.

@@ -9,7 +9,11 @@ import (
 	"github.com/ntson9p/coptimizer/internal/fsx"
 )
 
-// record builds one FILE_ID_BOTH_DIR_INFO record, padded to 8 bytes.
+// day is one day in FILETIME units (100 ns).
+const day = 24 * 3600 * 10_000_000
+
+// record builds one FILE_ID_BOTH_DIR_INFO record, padded to 8 bytes. Its
+// creation time is one day before ft.
 func record(name string, size, alloc int64, attrs, ea uint32, id uint64, ft int64, last bool) []byte {
 	n := utf16.Encode([]rune(name))
 	length := (offName + 2*len(n) + 7) &^ 7
@@ -19,6 +23,7 @@ func record(name string, size, alloc int64, attrs, ea uint32, id uint64, ft int6
 		le.PutUint32(b[offNext:], uint32(length))
 	}
 	le.PutUint64(b[offLastWrite:], uint64(ft))
+	le.PutUint64(b[offCreation:], uint64(ft-day))
 	le.PutUint64(b[offEndOfFile:], uint64(size))
 	le.PutUint64(b[offAllocation:], uint64(alloc))
 	le.PutUint32(b[offAttributes:], attrs)
@@ -50,7 +55,8 @@ func TestAppendEntries(t *testing.T) {
 		t.Fatalf("got %d entries; want 2 (no . or ..)", len(got))
 	}
 	f, l := got[0], got[1]
-	if f.Name != "file.bin" || f.Size != 5000 || f.Allocated != 8192 || f.FileID != 77 || !f.Modified.Equal(when) || f.ReparseTag != 0 {
+	if f.Name != "file.bin" || f.Size != 5000 || f.Allocated != 8192 || f.FileID != 77 || !f.Modified.Equal(when) || f.ReparseTag != 0 ||
+		!f.Created.Equal(when.Add(-24*time.Hour)) || !f.Changed().Equal(when) {
 		t.Errorf("file = %+v", f)
 	}
 	if l.Name != "link" || !l.IsReparse() || l.ReparseTag != fsx.TagMountPoint {

@@ -1,5 +1,6 @@
-// Package winfs reads the real Windows file system for the scanner. It only
-// ever reads: folders are opened for listing, files are never opened.
+// Package winfs is the real Windows file system for the scanner and the
+// deleter. Listing only reads: folders are opened for listing, files are never
+// opened. Deleting goes through Cleaner (clean_windows.go).
 package winfs
 
 import (
@@ -38,6 +39,11 @@ func (Lister) List(dir string) ([]fsx.Entry, error) {
 		return nil, &fs.PathError{Op: "list", Path: dir, Err: err}
 	}
 	defer windows.CloseHandle(h)
+	return listHandle(h, dir)
+}
+
+// listHandle lists the open folder h, whose path is dir.
+func listHandle(h windows.Handle, dir string) ([]fsx.Entry, error) {
 	bp := buffers.Get().(*[]byte)
 	defer buffers.Put(bp)
 	buf := *bp
@@ -69,6 +75,7 @@ func longPath(p string) string {
 // Byte offsets in a FILE_ID_BOTH_DIR_INFO record.
 const (
 	offNext       = 0
+	offCreation   = 8
 	offLastWrite  = 24
 	offEndOfFile  = 40
 	offAllocation = 48
@@ -102,6 +109,7 @@ func appendEntries(entries []fsx.Entry, buf []byte) ([]fsx.Entry, error) {
 				Attrs:     attrs,
 				FileID:    le.Uint64(rec[offFileID:]),
 				Modified:  fileTime(int64(le.Uint64(rec[offLastWrite:]))),
+				Created:   fileTime(int64(le.Uint64(rec[offCreation:]))),
 			}
 			if attrs&fsx.AttrReparsePoint != 0 {
 				e.ReparseTag = le.Uint32(rec[offEaSize:])

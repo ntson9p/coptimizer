@@ -55,6 +55,9 @@ func helper(mode string, args []string) {
 		for range 10 {
 			fmt.Print(chunk)
 		}
+	case "progress":
+		// Like DISM: a progress bar redrawn with carriage returns.
+		fmt.Print("Starting\r\n\r\n[==   10.0%   ]\r[=====50.0%   ]\r[====100.0%===]\r\nDone, no newline")
 	}
 	os.Exit(0)
 }
@@ -128,6 +131,23 @@ func TestOutputIsCapped(t *testing.T) {
 	res, err := execx.Real{}.Run(context.Background(), helperCmd(t, "loud"))
 	if err != nil || len(res.Stdout) != 8<<20 {
 		t.Fatalf("kept %d bytes, %v; want 8 MiB", len(res.Stdout), err)
+	}
+}
+
+func TestOutputArrivesLineByLine(t *testing.T) {
+	c := helperCmd(t, "progress")
+	var got []string
+	c.Output = func(line string) { got = append(got, line) }
+	res, err := execx.Real{}.Run(context.Background(), c)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("Run = %+v, %v", res, err)
+	}
+	want := []string{"Starting", "[==   10.0%   ]", "[=====50.0%   ]", "[====100.0%===]", "Done, no newline"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("lines = %q; want %q", got, want)
+	}
+	if !strings.Contains(string(res.Stdout), "Done, no newline") {
+		t.Errorf("the whole output must still be kept: %q", res.Stdout)
 	}
 }
 

@@ -251,3 +251,19 @@ func waitFor(t *testing.T, ok func() bool) {
 	}
 	t.Fatal("timed out")
 }
+
+func TestKnownFolders(t *testing.T) {
+	var reg FakeRegistry
+	reg.Set(CurrentUser, shellFolders, "Personal", `D:\Documents`)
+	reg.Set(CurrentUser, shellFolders, "Desktop", `%USERPROFILE%\Desktop`)
+	reg.Set(CurrentUser, shellFolders, "{374DE290-123F-4565-9164-39C4925E467B}", `%UNSET%\Downloads`)
+	env := map[string]string{"USERPROFILE": `C:\Users\alice`, "OneDrive": `E:\OneDrive`}
+	got := KnownFolders(&reg, func(k string) string { return env[k] })
+	want := []string{`C:\Users\alice\Desktop`, `D:\Documents`, `E:\OneDrive`}
+	if !slices.Equal(got, want) {
+		t.Errorf("KnownFolders = %q; want %q", got, want)
+	}
+	if got := expand(`%A%\%B%-%%`, func(k string) string { return map[string]string{"A": "x"}[k] }); got != `x\%B%-%%` {
+		t.Errorf("expand = %q", got)
+	}
+}

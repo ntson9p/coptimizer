@@ -60,9 +60,79 @@ type Rule struct {
 	ItemMin        int64 // list a single location only from this size on
 	Unreadable     bool  // report the folder even when it couldn't be read
 
+	// Action, if set, is how COptimizer can reclaim the space itself.
+	Action *Action
+
 	detect  func(ev *evaluation, r Rule) []Item // detectors beyond patterns
 	stage   stage
 	noTotal bool // the finding overlaps others, so it stays out of the totals
+}
+
+// ActionKind says how COptimizer carries out an action.
+type ActionKind string
+
+const (
+	// Delete deletes the contents of the finding's folders, and its single
+	// files, with the deleter (internal/clean).
+	Delete ActionKind = "delete"
+	// EmptyRecycleBin empties the user's Recycle Bin through Windows.
+	EmptyRecycleBin ActionKind = "recycle-bin"
+	// ComponentCleanup runs DISM /StartComponentCleanup, which removes
+	// components that updates replaced.
+	ComponentCleanup ActionKind = "component-cleanup"
+	// DeliveryOptimization asks the Delivery Optimization service to delete
+	// the update files it keeps to share with other PCs.
+	DeliveryOptimization ActionKind = "delivery-optimization"
+)
+
+// Action is a way COptimizer can reclaim a finding's space itself. Its texts
+// are action.<Kind>.* in web/i18n/en.json, plus an optional note for the rule,
+// rule.<ID>.action, in web/i18n/rules.en.json.
+type Action struct {
+	Kind ActionKind `json:"kind"`
+	// For Delete: Folders, if set, limits the finding's folders that are
+	// cleaned to those matching these patterns (the rule's other folders need
+	// their own tool). Include limits the files to those whose names match;
+	// MinAge leaves what changed more recently; RemoveRoot removes each
+	// folder itself too, for leftovers rather than caches.
+	Folders    []string      `json:"-"`
+	Include    []string      `json:"-"`
+	MinAge     time.Duration `json:"-"`
+	RemoveRoot bool          `json:"-"`
+	// NeedsClosed are the programs (process names) that must not be running.
+	NeedsClosed []string `json:"needsClosed,omitempty"`
+	// Long actions take minutes and can't be stopped safely once started.
+	Long bool `json:"long,omitempty"`
+}
+
+// Covers reports whether the action cleans the finding's location at path:
+// every location, unless the action names its own folders.
+func (a *Action) Covers(env Env, path string) bool {
+	if a.Folders == nil {
+		return true
+	}
+	segs := splitPath(path)
+	for _, pat := range a.Folders {
+		if matchSegs(splitPath(expandFor(env, pat, path)), segs) {
+			return true
+		}
+	}
+	return false
+}
+
+// expandFor fills in a pattern's variables for the location path, with the
+// per-user ones taken from the profile path lies in.
+func expandFor(env Env, pat, path string) string {
+	home := "<none>" // no real name contains "<", so this matches nothing
+	if env.Users != "" && len(path) > len(env.Users) && underAny(path, env.Users) {
+		name, _, _ := strings.Cut(path[len(env.Users)+1:], `\`)
+		home = env.Users + `\` + name
+	}
+	return strings.NewReplacer(
+		"{SystemDrive}", env.SystemDrive, "{Windows}", env.Windows, "{ProgramData}", env.ProgramData,
+		"{ProgramFiles}", env.ProgramFiles, "{ProgramFilesX86}", env.ProgramFilesX86, "{Users}", env.Users,
+		"{Profile}", home, "{LocalAppData}", home+`\AppData\Local`, "{AppData}", home+`\AppData\Roaming`,
+	).Replace(pat)
 }
 
 // stage orders the detectors: specific ones before the patterns, catch-alls
@@ -147,6 +217,7 @@ type Finding struct {
 	Bytes     int64    `json:"bytes"`
 	Items     []Item   `json:"items"`
 	MoreItems int      `json:"moreItems,omitempty"` // locations left out of Items
+	Action    *Action  `json:"action,omitempty"`    // what COptimizer can do about it
 }
 
 // Report is everything Evaluate found.
@@ -154,6 +225,42 @@ type Report struct {
 	Findings    []Finding      `json:"findings"` // largest first
 	Totals      map[Risk]int64 `json:"totals"`
 	GrowthSince time.Time      `json:"growthSince,omitzero"` // when the scan compared with was taken
+
+	all     map[string][]Item // every location of every finding, Items or not
+	claimed map[string]bool   // findings whose locations count for no other finding
+}
+
+// Find returns the finding with the given ID.
+func (r Report) Find(id string) (Finding, bool) {
+	for _, f := range r.Findings {
+		if f.ID == id {
+			return f, true
+		}
+	}
+	return Finding{}, false
+}
+
+// Locations returns every location of the finding id, largest first,
+// including those left out of its Items.
+func (r Report) Locations(id string) []Item { return r.all[id] }
+
+// ClaimedInside returns the locations of other findings that lie inside
+// folder: a cleanup of folder must leave them to their own finding. Findings
+// that only overlap others, like growth, don't count.
+func (r Report) ClaimedInside(id, folder string) []string {
+	var out []string
+	for other, items := range r.all {
+		if other == id || !r.claimed[other] {
+			continue
+		}
+		for _, it := range items {
+			if len(it.Path) > len(folder) && underAny(it.Path, folder) {
+				out = append(out, it.Path)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Options tunes Evaluate.
@@ -194,7 +301,8 @@ func Evaluate(res *scan.Result, env Env, opts Options) Report {
 		}
 	}
 
-	rep := Report{Totals: map[Risk]int64{Safe: 0, Moderate: 0, Manual: 0, Info: 0}}
+	rep := Report{Totals: map[Risk]int64{Safe: 0, Moderate: 0, Manual: 0, Info: 0},
+		all: make(map[string][]Item), claimed: make(map[string]bool)}
 	for _, r := range catalog {
 		items := found[r.ID]
 		var total int64
@@ -203,11 +311,16 @@ func Evaluate(res *scan.Result, env Env, opts Options) Report {
 			total += it.Bytes
 			unreadable = unreadable || it.Unreadable
 		}
+		slices.SortStableFunc(items, func(a, b Item) int { return cmpBytes(a.Bytes, b.Bytes, a.Path, b.Path) })
+		if len(items) > 0 {
+			// Kept even when too small to report: a cleanup of a broader
+			// folder must still leave these locations alone.
+			rep.all[r.ID], rep.claimed[r.ID] = items, !r.noTotal
+		}
 		if len(items) == 0 || (total < r.Min && !(r.Unreadable && unreadable)) {
 			continue
 		}
-		slices.SortStableFunc(items, func(a, b Item) int { return cmpBytes(a.Bytes, b.Bytes, a.Path, b.Path) })
-		f := Finding{ID: r.ID, Category: r.Category, Risk: r.Risk, Bytes: total, Items: items}
+		f := Finding{ID: r.ID, Category: r.Category, Risk: r.Risk, Bytes: total, Items: items, Action: r.Action}
 		if len(items) > maxItems {
 			f.Items, f.MoreItems = items[:maxItems], len(items)-maxItems
 		}

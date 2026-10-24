@@ -51,6 +51,8 @@ type scanJob struct {
 	progress scan.Progress
 	result   *scan.Result
 	report   *rules.Report
+	previous []rules.Snapshot // the earlier scans its growth compares with
+	updated  time.Time        // when a cleanup last measured folders again
 	cancel   context.CancelFunc
 }
 
@@ -117,8 +119,9 @@ func (m *scans) run(ctx context.Context, j *scanJob) {
 	}})
 	finished := m.now()
 	var report *rules.Report
+	var previous []rules.Snapshot
 	if err == nil {
-		report = m.evaluate(res, finished)
+		report, previous = m.evaluate(res, finished)
 	}
 	m.mu.Lock()
 	j.finished = finished
@@ -132,7 +135,7 @@ func (m *scans) run(ctx context.Context, j *scanJob) {
 	case err != nil:
 		j.state, j.err = "failed", err.Error()
 	default:
-		j.state, j.result, j.report = "done", res, report
+		j.state, j.result, j.report, j.previous = "done", res, report, previous
 	}
 	v := j.view()
 	m.mu.Unlock()
@@ -142,7 +145,7 @@ func (m *scans) run(ctx context.Context, j *scanJob) {
 // evaluate finds the space hogs in a finished scan, comparing it with the
 // previous scan of the same drives taken with the same rights, then keeps a
 // snapshot of this one for next time.
-func (m *scans) evaluate(res *scan.Result, at time.Time) *rules.Report {
+func (m *scans) evaluate(res *scan.Result, at time.Time) (*rules.Report, []rules.Snapshot) {
 	elevated := m.system.Elevated()
 	var previous []rules.Snapshot
 	if m.snapshots != nil {
@@ -160,7 +163,49 @@ func (m *scans) evaluate(res *scan.Result, at time.Time) *rules.Report {
 			}
 		}
 	}
-	return &rep
+	return &rep, previous
+}
+
+// latestReport returns the most recent finished scan and its findings.
+func (m *scans) latestReport() (string, *rules.Report, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.order) - 1; i >= 0; i-- {
+		if j := m.byID[m.order[i]]; j.report != nil {
+			return j.id, j.report, true
+		}
+	}
+	return "", nil, false
+}
+
+// refresh measures folders of the scan id again after a cleanup and works out
+// its findings anew. Growth compares with the same earlier scans as before;
+// no new snapshot is kept, since only some folders were measured.
+func (m *scans) refresh(ctx context.Context, id string, paths []string) error {
+	m.mu.Lock()
+	j := m.byID[id]
+	if j == nil || j.result == nil {
+		m.mu.Unlock()
+		return nil // gone from memory meanwhile: nothing to update
+	}
+	res, previous := j.result, j.previous
+	m.mu.Unlock()
+
+	fresh, err := scan.Refresh(ctx, m.lister, res, paths)
+	if err != nil {
+		return err
+	}
+	rep := rules.Evaluate(fresh, m.env, rules.Options{Previous: previous})
+	m.mu.Lock()
+	if j.result != res {
+		m.mu.Unlock()
+		return nil // refreshed by someone else meanwhile
+	}
+	j.result, j.report, j.updated = fresh, &rep, m.now()
+	v := j.view()
+	m.mu.Unlock()
+	m.hub.publish("scan.updated", v, true)
+	return nil
 }
 
 // get returns the scan with the given ID.
@@ -242,6 +287,7 @@ type scanView struct {
 	State    string       `json:"state"`
 	Started  time.Time    `json:"started"`
 	Finished *time.Time   `json:"finished,omitempty"`
+	Updated  *time.Time   `json:"updated,omitempty"` // folders measured again after a cleanup
 	Error    string       `json:"error,omitempty"`
 	Progress progressView `json:"progress"`
 	Summary  *summaryView `json:"summary,omitempty"`
@@ -276,6 +322,10 @@ func (j *scanJob) view() scanView {
 	if !j.finished.IsZero() {
 		f := j.finished
 		v.Finished = &f
+	}
+	if !j.updated.IsZero() {
+		u := j.updated
+		v.Updated = &u
 	}
 	if r := j.result; r != nil {
 		denied := r.Denied

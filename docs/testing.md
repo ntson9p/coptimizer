@@ -8,7 +8,7 @@ The riskiest code in this app deletes files and runs system tools as Administrat
 
 ## 1. Six independent protections
 
-1. **Design**: every side effect goes through an interface: the filesystem (`fsx`), the command runner (`execx`), the system (`sysinfo.Reader` and `sysinfo.Mutator`). Core logic is tested with in-memory fakes; the real implementations are kept thin.
+1. **Design**: every side effect goes through an interface: the filesystem (`fsx.Lister`, and `fsx.Cleaner` for deleting), the command runner (`execx`), the system (`sysinfo.Reader` and `sysinfo.Mutator`). Core logic, the deleter included, is tested with in-memory fakes; the real implementations are kept thin.
 2. **Forbidden-API test**: `internal/safety/forbidden_test.go` parses every Go file in the repository, production and test code alike. Only a short, reviewed list of files may import `os/exec`, `syscall`, `unsafe` or `golang.org/x/sys/...`, or call the `os` functions that create, change or delete files or start programs. A second check makes every package with tests start them through `testguard`.
 3. **Sandboxes**: a test that needs a real filesystem gets one from `sandbox.New(t)`: a fresh folder (under `<repo>\.tmp\` when run through `scripts\test.ps1`) that's deleted afterwards. The `sandbox` helpers are the only test code allowed to create files.
 4. **Fuses in the production code**: inside a test binary (`testing.Testing()` is true):
@@ -16,7 +16,7 @@ The riskiest code in this app deletes files and runs system tools as Administrat
    - `GuardRun` panics for any program except registered test helpers;
    - `GuardShellOpen` (opening a link in the browser, an Explorer window, or the UAC prompt) and `GuardSystemChange` (registry, power options, restore points, Recycle Bin…) panic unconditionally.
 
-   A forgotten fake therefore crashes the test instead of changing the PC.
+   A forgotten fake therefore crashes the test instead of changing the PC. The guards sit right before the system calls: the real deleter calls `GuardDelete` for every file it removes, so even its own tests can only delete inside their sandboxes. Methods that change the system (`RealMutator`) are never called by a test, not even to see the fuse trip, since a missing guard would then change the PC; a test reads their source instead and checks that each starts with its guard.
 5. **No admin**: `scripts\test.ps1` and the shared `testguard` `TestMain` refuse to run elevated, so Windows permissions would still block changes to system folders even if everything above failed. They would not protect the user's own files (Documents, Desktop), which a normal process can write; protections 2–4 cover those. The only exceptions are GitHub-hosted CI runners (disposable VMs) and `-Smoke -Elevated`.
 6. **Real actions only on disposable machines**: tests that really clean Windows folders run only on a throwaway VM or CI runner, behind two independent checks (section 5).
 
@@ -53,18 +53,36 @@ The read-only smoke tests (section 4) only ever receive `sysinfo.Reader`, so the
 
 ### Deleter (L2 and L3)
 
-- A junction inside a cache folder pointing at a **canary** folder outside it: the canary is untouched (a real `mklink /J`, which needs no admin)
-- Symlinks: tested when Developer Mode allows creating them, otherwise skipped with a message
-- The root itself is a junction: refused
-- Folder swapped for a junction between preview and run: refused at run time
-- Read-only, hidden and system attributes: deleted after clearing read-only
-- A file the test holds open without delete sharing: skipped and reported; the job ends as `partial`
-- A folder with a deny entry for the current user (set by the test on its own sandbox): skipped
-- `MinAge` boundaries, include and exclude patterns, `KeepRoot`
-- Cancel half-way: counts stay consistent
-- Dry-run parity (a property test on random trees): the dry run lists exactly what the real run deletes
-- Cloud placeholder attribute (fake FS): never opened, skipped
-- A 100,000-file folder: time stays reasonable
+`internal/clean` against the in-memory file system, and `internal/winfs` against real folders in sandboxes:
+
+- The contents go and the folder stays; with `RemoveRoot` the folder goes too
+- A junction inside the folder being cleaned, pointing at a **canary** folder: the junction and the canary are untouched. The canary sits in the same sandbox, so the fuses wouldn't stop a buggy deleter: the test checks the deleter itself
+- The folder itself is a junction: refused. Opened by its 8.3 short name: refused
+- **A folder swapped for a junction after the folder was opened**, as malware racing the deleter might: listing and deleting through it are refused, and removing the junction leaves its target alone
+- Read-only, hidden and system files: deleted. A hard link: only that name goes
+- A file held open without delete sharing: skipped, reported "in use", the cleanup ends as `partial`
+- A file the user may not delete (the test sets a deny entry on its own sandbox, restored afterwards): skipped, reported "denied"
+- `MinAge` boundaries, counted from the later of creation and last change, and fresh empty folders kept; `Include` and `Exclude`
+- The deny list decides for every folder and file, and a folder that resolves elsewhere is refused even if the file system says it opened it
+- Online-only files: never touched. Cancel half-way: what was reported deleted is exactly what is gone
+- **Dry-run parity** (a property test on 30 random trees): the dry run reports exactly what the real run then deletes
+- Long paths (over 260 characters) and Vietnamese names; a 100,000-file folder in about a second
+
+**Mutation checks**: each protection (links skipped, the deny list per entry, the resolved-path checks, age from creation, the exception rule, fresh folders kept) was weakened on purpose, one at a time; a test failed every time.
+
+### Deny list
+
+Table tests for every protected tree, exception and general folder; spelling variants (case, `/`, `\\?\`); a known folder moved inside an exception stays protected; a missing system folder makes the policy refuse to build. Go fuzzing checks that spellings Windows treats as the same path always get the same answer, and that nothing in System32 or a profile root is ever allowed.
+
+### Actions
+
+- **Reviewed list**: a test lists every location a deletion may clean, with its options (`only *.log *.cab`, `older than 24h`, `folder too`). Any change to the catalog's deletable locations makes it fail until the list is updated, so the change is reviewed, like the forbidden-API list.
+- Every deletable location, expanded on a standard PC, passes the deny list; actions name only their rule's folders; only Safe findings can be deleted.
+- Plans on simulated PCs: only your own profile (another account's cache is listed as left alone), system folders only with Administrator rights, locations that need their own tool left out (pnpm's store), other findings' folders inside a folder left to them (`Temp\SymbolCache`), recent temp files kept, programs that must be closed, the Recycle Bin, DISM's exact command, its progress bar and exit codes (3010: restart needed), Delivery Optimization's command. A simulation changes nothing.
+
+### Cleanup queue and API (`httptest`, fakes)
+
+From preview to history: the preview deletes nothing; the cleanup deletes exactly that; free space grows by it; events arrive in order; the folders are measured again and the finding goes; the history records it. A preview works once and expires after 10 minutes; requests can't name folders; a cleanup waits until Chrome is closed; simulation mode deletes nothing; a running deletion can be stopped, a queued one taken out; DISM's cleanup can't be stopped, and quitting is refused while it runs.
 
 ### Scanner
 
@@ -110,7 +128,7 @@ Every rule is checked against small simulated drives: the items of the manual sc
 
 ### UI (Playwright, optional, demo mode)
 
-Quick scan → findings → preview → confirm → live progress → history; cancelling a scan; a failing job; server restart and reconnect; dark mode; a narrow window.
+Scan → explorer → findings → system information; then, on the same simulated PC: preview and clean the npm cache (its finding disappears once the folder is measured again), a cleanup blocked until VS Code is closed, simulation mode, the Recycle Bin, DISM's cleanup with live progress and no Stop button, and the Activity page with the history. A used link doesn't sign in. Screenshots of each step, in light and dark mode. Planned: cancelling a scan, server restart and reconnect, a narrow window.
 
 ## 4. Read-only smoke tests (L5)
 
@@ -118,21 +136,22 @@ Quick scan → findings → preview → confirm → live progress → history; c
 
 - enumerate the real `C:\` up to a cap (for example the first 200,000 entries) and expect nothing beyond normal access-denied errors;
 - compare free space with what PowerShell reports;
-- query the Recycle Bin size, restore-point storage, WSL distros, Docker (if running) and, elevated, `DISM /AnalyzeComponentStore`, which only reads.
+- list the running programs and query the Recycle Bin's size; later restore-point storage, WSL distros, Docker (if running) and, elevated, `DISM /AnalyzeComponentStore`, which only reads.
 
 They receive only `sysinfo.Reader`. The mutator is never constructed, and its real implementation would panic inside a test anyway. Outside GitHub-hosted runners, `testguard` allows elevation only in this explicit `-Elevated` smoke mode.
 
 ## 5. Destructive tests (L6): never on a developer's PC
 
-- **Where**: a GitHub Actions `windows-latest` runner (a fresh VM for every run, thrown away afterwards; needs a GitHub repository), or a local VirtualBox VM with a Windows 11 evaluation image and a snapshot to roll back to. Windows 11 Home has neither Windows Sandbox nor Hyper-V.
-- **How**: these tests start the real built `coptimizer.exe` on the throwaway machine and drive it only through its HTTP API. The exe isn't a test binary, so the fuses don't apply to it; the disposable machine is the protection.
-- **Gate**: the test files carry the build tag `destructive`, and also require `COPTIMIZER_DESTRUCTIVE=1` **and** proof of a disposable machine: `GITHUB_ACTIONS=true` with `RUNNER_ENVIRONMENT=github-hosted`, or a marker file `C:\COPTIMIZER_DISPOSABLE_VM` that exists only inside the VM. If anything is missing, they skip.
-- **What**: create real junk (temp files, an npm cache via `npm cache add`, Recycle Bin items), run each action through the API, then check the freed space and that canary files survived. Also hibernation off and on, creating and deleting a restore point, and DISM component cleanup (weekly, since it's slow).
+- **Where**: a GitHub Actions `windows-latest` runner (a fresh VM for every run, thrown away afterwards), or a local VirtualBox VM with a Windows 11 evaluation image and a snapshot to roll back to. Windows 11 Home has neither Windows Sandbox nor Hyper-V.
+- **How**: `scripts\destructive.ps1` starts the real built `coptimizer.exe -serve` with Administrator rights and drives it only through its HTTP API, as the page does. The exe isn't a test binary, so the fuses don't apply to it; the disposable machine is the protection.
+- **Gate**: it does nothing unless `COPTIMIZER_DESTRUCTIVE=1`, and then refuses to run unless the machine proves it is disposable (`GITHUB_ACTIONS=true` with `RUNNER_ENVIRONMENT=github-hosted`, or the marker file `C:\COPTIMIZER_DISPOSABLE_VM` that exists only inside the VM) and it has Administrator rights. CI runs it as its own job on every push.
+- **What it checks today**: it puts junk in the user's npm cache (300 MB), temp folder (400 MB, three days old, plus a fresh file) and Recycle Bin (150 MB), and a junction in the npm cache that leads to a canary folder. Then it scans C:, previews and runs the three cleanups, and checks that the junk is gone, the fresh temp file, the canary and the junction survive, free space grew by at least 80% of the estimate, and `history.jsonl` has three entries.
+- **Later** (phase 4): hibernation off and on, creating and deleting a restore point, and DISM component cleanup (weekly, since it's slow).
 
 ## 6. Manual checks on a real PC
 
 - Phases 1–2 are read-only: run a full scan and compare a few folders with Explorer's Properties.
-- Phase 3: safe actions one at a time, always preview first. Start with ones whose size you already know (Recycle Bin, npm cache), and check `data\history.jsonl` afterwards.
+- Phase 3: previews were checked read-only on the author's PC (unelevated, in simulation mode, no cleanup started). Real cleanups come next, one at a time and always preview first: start with ones whose size you already know (npm cache, Playwright browsers), and check `data\history.jsonl` afterwards.
 - Phase 4: dry runs only, unless you decide to run one for real.
 
 ## 7. How to run
@@ -142,6 +161,7 @@ scripts\test.ps1                    # L1–L4 (API); refuses to run as Administr
 scripts\test.ps1 -UI                # also the browser tests in e2e\ against coptimizer -demo
 scripts\test.ps1 -Smoke             # L5 only: read-only checks against the real system
 scripts\test.ps1 -Smoke -Elevated   # L5 including the checks that need Administrator
+scripts\destructive.ps1             # L6: skips unless COPTIMIZER_DESTRUCTIVE=1, refuses unless disposable
 ```
 
 The browser tests use Node.js, `playwright-core` (no browser download) and the installed Chrome (`COPTIMIZER_E2E_CHANNEL` picks another). They save screenshots in `.tmp\e2e`.

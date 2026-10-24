@@ -23,11 +23,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ntson9p/coptimizer/internal/actions"
 	"github.com/ntson9p/coptimizer/internal/demo"
 	"github.com/ntson9p/coptimizer/internal/execx"
 	"github.com/ntson9p/coptimizer/internal/fsx"
 	"github.com/ntson9p/coptimizer/internal/probe"
 	"github.com/ntson9p/coptimizer/internal/rules"
+	"github.com/ntson9p/coptimizer/internal/safety"
 	"github.com/ntson9p/coptimizer/internal/server"
 	"github.com/ntson9p/coptimizer/internal/store"
 	"github.com/ntson9p/coptimizer/internal/sysinfo"
@@ -46,6 +48,7 @@ type options struct {
 	instance   string
 	noBrowser  bool
 	dataDir    string
+	simulate   bool
 }
 
 func main() {
@@ -57,6 +60,7 @@ func main() {
 	flag.StringVar(&o.instance, "instance", "", "identifier that /healthz returns (set by the launcher)")
 	flag.BoolVar(&o.noBrowser, "no-browser", false, "don't open a browser, just print the link")
 	flag.StringVar(&o.dataDir, "data-dir", "", `folder for COptimizer's own data, like the scan history (default: "data" next to the exe)`)
+	flag.BoolVar(&o.simulate, "simulate", false, "simulation mode: cleanups only show what they would do (can be switched on the page too)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
@@ -93,6 +97,9 @@ func launch(o options) int {
 		}
 		args += " -data-dir " + escapeArg(dir)
 	}
+	if o.simulate {
+		args += " -simulate"
+	}
 	if err := runElevated(exe, args); err != nil {
 		if errors.Is(err, errDeclined) {
 			fmt.Fprintln(os.Stderr, "The prompt was declined, so COptimizer did not start. (To look around without Administrator rights, run: coptimizer -demo)")
@@ -120,11 +127,14 @@ func serve(o options) int {
 		env                      = rules.SystemEnv()
 		snapshots server.SnapshotStore
 		probes    *probe.Deps
+		cleanups  *actions.Deps
+		history   server.HistoryStore
 		where     = "nowhere: demo mode writes nothing"
 	)
 	if o.demo {
 		m := demo.New(20 * time.Millisecond)
 		lister, sys, env, snapshots, probes = m.FS, m.System, m.Env, m.Snapshots, &m.Probes
+		cleanups, history = &m.Actions, m.History
 	} else {
 		if sys.Elevated() {
 			if err := winfs.EnableBackupPrivilege(); err != nil {
@@ -139,10 +149,19 @@ func serve(o options) int {
 			if err != nil {
 				log.Printf("the scan history in %s couldn't be read (%v); a new one starts", dir, err)
 			}
-			snapshots, where = s, dir
+			snapshots, history, where = s, store.OpenHistory(dir), dir
 		}
 		probes = &probe.Deps{Registry: probe.SystemRegistry{}, Stat: fileSize, Runner: execx.Real{},
 			Elevated: sys.Elevated(), SystemRoot: env.Windows, SystemDrive: env.SystemDrive}
+		policy, err := safety.NewPolicy(safety.Places{SystemDrive: env.SystemDrive, Windows: env.Windows,
+			ProgramData: env.ProgramData, ProgramFiles: env.ProgramFiles, ProgramFilesX86: env.ProgramFilesX86, Users: env.Users,
+			KnownFolders: probe.KnownFolders(probe.SystemRegistry{}, os.Getenv)})
+		if err != nil {
+			log.Printf("cleanups are off: %v", err)
+		} else {
+			cleanups = &actions.Deps{Cleaner: winfs.Cleaner{}, Policy: policy, Programs: sysinfo.Real{}, RecycleBin: sysinfo.Real{},
+				Mutator: sysinfo.RealMutator{}, Runner: execx.Real{}, Elevated: sys.Elevated(), Env: env, Now: time.Now}
+		}
 	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", o.port))
@@ -162,6 +181,7 @@ func serve(o options) int {
 	srv := server.New(server.Config{
 		Port: port, LaunchCode: code, Instance: o.instance, Version: version, Demo: o.demo,
 		Lister: lister, System: sys, Env: env, Snapshots: snapshots, Probes: probes,
+		Actions: cleanups, History: history, Simulate: o.simulate,
 		Web: web.Files, Logf: log.Printf, Shutdown: stop,
 	})
 	hs := &http.Server{Handler: srv, ReadHeaderTimeout: 10 * time.Second}
@@ -173,7 +193,7 @@ func serve(o options) int {
 	}()
 
 	link := srv.Link(code)
-	printBanner(port, link, sys.Elevated(), o.demo, where)
+	printBanner(port, link, sys.Elevated(), o.demo, o.simulate, where)
 	if o.launchCode == "" && !o.noBrowser {
 		if err := openInBrowser(link, sys.Elevated()); err != nil {
 			fmt.Println("Open the link above in your browser.")
@@ -217,7 +237,7 @@ func fileSize(path string) (int64, bool) {
 	return fi.Size(), true
 }
 
-func printBanner(port int, link string, elevated, demoMode bool, data string) {
+func printBanner(port int, link string, elevated, demoMode, simulate bool, data string) {
 	rights := "Administrator: every folder can be measured"
 	switch {
 	case demoMode:
@@ -227,7 +247,10 @@ func printBanner(port int, link string, elevated, demoMode bool, data string) {
 	}
 	fmt.Printf("COptimizer %s is running on http://127.0.0.1:%d\n", version, port)
 	fmt.Printf("  Rights: %s\n", rights)
-	fmt.Printf("  Scan history is kept in: %s\n", data)
+	fmt.Printf("  Scan and cleanup history are kept in: %s\n", data)
+	if simulate {
+		fmt.Println("  Simulation mode: cleanups only show what they would do.")
+	}
 	fmt.Printf("  One-time link: %s\n", link)
 	fmt.Println("  Keep this window open while you use COptimizer.")
 	fmt.Println("  Type L and press Enter for a new one-time link, or Q to quit.")

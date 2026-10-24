@@ -23,3 +23,22 @@ jobs:
       - name: Build
         shell: pwsh
         run: ./scripts/build.ps1
+
+  destructive:
+    # Real cleanups by the real exe, with Administrator rights, on this
+    # throwaway VM only: the script refuses to run anywhere else.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        shell: pwsh
+        run: ./scripts/build.ps1
+      - name: Destructive tests
+        shell: pwsh
+        env:
+          COPTIMIZER_DESTRUCTIVE: "1"
+        run: ./scripts/destructive.ps1

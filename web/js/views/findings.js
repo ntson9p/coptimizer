@@ -3,6 +3,7 @@ import { h, rich } from '../dom.js';
 import { bytes, count, date } from '../format.js';
 import { t } from '../i18n.js';
 import { store } from '../store.js';
+import { openCleanup } from './cleanup.js';
 
 const RISKS = ['safe', 'moderate', 'manual', 'info'];
 
@@ -12,6 +13,7 @@ export function mount(root, params) {
   root.append(h('h1', {}, t('nav.findings')));
   const system = h('section', { class: 'card', hidden: true });
   let gone = false;
+  const unsubscribers = [];
 
   const scan = store.state.scan;
   if (!scan || scan.state !== 'done') {
@@ -35,7 +37,7 @@ export function mount(root, params) {
       });
       renderList(list, report, filter);
     };
-    api.findings(scan.id).then(
+    const load = () => api.findings(scan.id).then(
       (rep) => {
         if (gone) return;
         report = rep;
@@ -45,6 +47,15 @@ export function mount(root, params) {
         if (!gone) head.replaceChildren(h('p', {}, t('error.generic', { message: e.message })));
       },
     );
+    load();
+    // A cleanup measures its folders again: the same scan, new findings.
+    let updated = scan.updated;
+    unsubscribers.push(store.subscribe((state) => {
+      if (state.scan?.id === scan.id && state.scan.updated !== updated) {
+        updated = state.scan.updated;
+        load();
+      }
+    }));
   }
 
   let systemKey = '';
@@ -56,10 +67,10 @@ export function mount(root, params) {
     }
   };
   renderSystemIfChanged(store.state);
-  const unsubscribe = store.subscribe(renderSystemIfChanged);
+  unsubscribers.push(store.subscribe(renderSystemIfChanged));
   return () => {
     gone = true;
-    unsubscribe();
+    for (const u of unsubscribers) u();
   };
 }
 
@@ -77,7 +88,7 @@ function renderHead(head, scan, report, filter, onFilter) {
   head.replaceChildren(
     h('p', { class: 'muted' }, t('findings.from', { roots: scan.roots.join(', '), date: date(scan.finished) })),
     h('div', { class: 'tiles' }, tiles),
-    h('p', { class: 'note' }, t('findings.readOnly')),
+    h('p', { class: 'note' }, t(store.state.status?.cleanups ? 'findings.cleanups' : 'findings.readOnly')),
   );
 }
 
@@ -117,6 +128,11 @@ function card(f, report) {
     ),
     h('p', {}, rich(t(`rule.${f.id}.what`))),
     f.id === 'other.growth' && report.growthSince ? h('p', { class: 'muted' }, t('findings.since', { date: date(report.growthSince) })) : null,
+    f.action && store.state.status?.cleanups
+      ? h('div', { class: 'finding-actions' },
+        h('button', { type: 'button', class: 'primary small', onclick: () => openCleanup(f) }, t(`action.${f.action.kind}.button`)),
+        h('span', { class: 'muted' }, t('findings.previewFirst')))
+      : null,
     h('details', {},
       h('summary', {}, t('findings.details', { count: count(f.items.length + (f.moreItems || 0)) })),
       h('h4', {}, t('findings.how')),

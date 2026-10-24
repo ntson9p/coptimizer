@@ -36,6 +36,11 @@ export function date(iso) {
   return new Date(iso).toLocaleDateString('en', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+export function dateTime(iso) {
+  if (!iso) return '–';
+  return new Date(iso).toLocaleString('en', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 // baseName and dirName split a Windows path.
 export function baseName(path) {
   return path.slice(path.lastIndexOf('\\') + 1);

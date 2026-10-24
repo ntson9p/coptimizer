@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -47,6 +48,12 @@ func (Real) Run(ctx context.Context, c Cmd) (Result, error) {
 	}
 	var stdout, stderr capped
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	var out *lines
+	if c.Output != nil {
+		out = &lines{fn: c.Output}
+		cmd.Stdout = io.MultiWriter(&stdout, out.stream())
+		cmd.Stderr = io.MultiWriter(&stderr, out.stream())
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 	cmd.Cancel = func() error { return windows.TerminateJobObject(job, 1) }
 	cmd.WaitDelay = 5 * time.Second
@@ -59,6 +66,9 @@ func (Real) Run(ctx context.Context, c Cmd) (Result, error) {
 		return Result{}, err
 	}
 	err = cmd.Wait()
+	if out != nil {
+		out.flush() // the output copiers are done once Wait returns
+	}
 	res := Result{Stdout: stdout.buf.Bytes(), Stderr: stderr.buf.Bytes(), ExitCode: -1}
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
