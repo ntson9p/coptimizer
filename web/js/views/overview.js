@@ -9,8 +9,9 @@ import { store } from '../store.js';
 export function mount(root) {
   const drivesCard = h('section', { class: 'card' });
   const scanCard = h('section', { class: 'card' });
+  const findingsCard = h('section', { class: 'card', hidden: true });
   const topCard = h('section', { class: 'card', hidden: true });
-  root.append(h('h1', {}, t('nav.overview')), drivesCard, scanCard, topCard);
+  root.append(h('h1', {}, t('nav.overview')), drivesCard, scanCard, findingsCard, topCard);
 
   let drivesKey = '';
   let scanKey = '';
@@ -32,6 +33,7 @@ export function mount(root) {
     if (running && live) updateLive(live, state.progress ?? state.scan.progress);
     if (state.scan?.state === 'done' && state.scan.id !== topFor) {
       topFor = state.scan.id;
+      renderTopFindings(findingsCard, state.scan);
       renderTop(topCard, state.scan);
     }
   }
@@ -123,11 +125,18 @@ function renderScan(card, scan) {
   const notes = [];
   if (s.errors > 0) notes.push(h('p', { class: 'note' }, t('scan.hint.denied')));
   if (s.unaccounted > 0) notes.push(h('p', { class: 'note' }, t('scan.hint.unaccounted')));
+  const totals = s.totals ?? {};
   card.replaceChildren(
     h('div', { class: 'scan-head' },
       h('h2', {}, t('scan.done', { roots, time: elapsed })),
-      h('a', { class: 'button primary', href: `#/explorer?path=${encodeURIComponent(scan.roots[0])}` }, t('scan.explore')),
+      h('div', { class: 'actions' },
+        h('a', { class: 'button primary', href: '#/findings' }, t('scan.seeFindings')),
+        h('a', { class: 'button', href: `#/explorer?path=${encodeURIComponent(scan.roots[0])}` }, t('scan.explore')),
+      ),
     ),
+    h('p', { class: 'reclaim' }, t('scan.reclaimable', {
+      safe: bytes(totals.safe ?? 0), moderate: bytes(totals.moderate ?? 0), manual: bytes(totals.manual ?? 0),
+    })),
     h('div', { class: 'stats' },
       stat(t('scan.stat.counted'), h('strong', {}, bytes(s.allocated))),
       stat(t('scan.stat.files'), h('strong', {}, count(s.files))),
@@ -155,6 +164,32 @@ function updateLive(live, p) {
 
 function stat(label, valueEl) {
   return h('div', { class: 'stat' }, h('span', { class: 'muted' }, label), valueEl);
+}
+
+// renderTopFindings lists the five biggest findings that free space, as a
+// starting point.
+async function renderTopFindings(card, scan) {
+  try {
+    const rep = await api.findings(scan.id);
+    const top = rep.findings.filter((f) => f.risk !== 'info' && f.bytes > 0).slice(0, 5);
+    if (!top.length) {
+      card.hidden = true;
+      return;
+    }
+    card.replaceChildren(
+      h('h2', {}, t('findings.top')),
+      h('div', { class: 'top-list' }, top.map((f) =>
+        h('a', { class: 'finding-row', href: `#/findings?risk=${f.risk}` },
+          h('span', { class: 'name' }, t(`rule.${f.id}.title`)),
+          h('span', { class: `badge risk-badge risk-${f.risk}` }, t(`risk.${f.risk}`)),
+          h('span', { class: 'size' }, bytes(f.bytes)),
+        ))),
+      h('a', { class: 'button', href: '#/findings' }, t('findings.seeAll')),
+    );
+    card.hidden = false;
+  } catch {
+    card.hidden = true;
+  }
 }
 
 async function renderTop(card, scan) {

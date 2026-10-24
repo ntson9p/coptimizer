@@ -22,6 +22,9 @@ func runElevated(exe, args string) error {
 	return err
 }
 
+// escapeArg quotes s as one argument on a Windows command line.
+func escapeArg(s string) string { return windows.EscapeArg(s) }
+
 // openInBrowser opens link in the default browser. A browser started by an
 // elevated process would run elevated too, so then the link goes through
 // explorer.exe, which hands it to the user's normal, unelevated shell.

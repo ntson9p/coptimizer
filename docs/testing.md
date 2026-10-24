@@ -14,7 +14,7 @@ The riskiest code in this app deletes files and runs system tools as Administrat
 4. **Fuses in the production code**: inside a test binary (`testing.Testing()` is true):
    - `GuardWrite` and `GuardDelete` panic unless the path is inside a registered sandbox, both as written and after Windows itself (`GetFinalPathNameByHandle`) has followed every junction and link on the way;
    - `GuardRun` panics for any program except registered test helpers;
-   - `GuardSystemChange` (registry, power options, restore points, Recycle Bin…) panics unconditionally.
+   - `GuardShellOpen` (opening a link in the browser, an Explorer window, or the UAC prompt) and `GuardSystemChange` (registry, power options, restore points, Recycle Bin…) panic unconditionally.
 
    A forgotten fake therefore crashes the test instead of changing the PC.
 5. **No admin**: `scripts\test.ps1` and the shared `testguard` `TestMain` refuse to run elevated, so Windows permissions would still block changes to system folders even if everything above failed. They would not protect the user's own files (Documents, Desktop), which a normal process can write; protections 2–4 cover those. The only exceptions are GitHub-hosted CI runners (disposable VMs) and `-Smoke -Elevated`.
@@ -87,9 +87,17 @@ The read-only smoke tests (section 4) only ever receive `sysinfo.Reader`, so the
 - CIM JSON for one item and for several (`ConvertTo-Json` returns an object for one item and an array for several)
 - Disk Cleanup handler registry fixtures
 
-### Command runner (L3, with a helper exe)
+### Command runner (L3, the test binary as its own helper)
 
-`TestMain` builds `internal/execx/testhelper` into `.tmp`. The helper prints lines, writes UTF-16, sleeps, starts a grandchild process and exits with a chosen code. Tests cover streaming order, decoding, a timeout that kills the whole tree (Job Object), cancel, exit codes, and argument quoting (spaces, quotes, Unicode).
+Started with `COPTIMIZER_EXECX_HELPER` set, the `execx` test binary acts as the program under test instead of running tests: it echoes its arguments, exits with a chosen code, sleeps, floods its output, or starts a grandchild (itself again) and sleeps. It is registered as the only program the fuses let run, so no other program can ever start. Tests cover output and exit codes, argument quoting (spaces, quotes, backslashes, Unicode, `&|<>^`), a timeout and a cancel that stop the whole process tree (the grandchild is checked to be gone), the output cap, and that an unregistered program trips the fuse before it can start.
+
+### Probes (fakes and fixtures)
+
+Probes read the registry through an interface: tests use an in-memory registry. DISM is never run in tests; its answers come from samples in `internal/probe/testdata` (with Windows line endings and the progress bar), including exit code 740 and output that can't be understood. Without Administrator rights DISM isn't even attempted.
+
+### Findings
+
+Every rule is checked against small simulated drives: the items of the manual scan in space-hogs.md (section 5) are found with the right sizes; per-user rules cover every profile but not `Default`; a location counts for the most specific rule only, and all findings add up to exactly what the scan counted; detectors (`node_modules`, unexplained folders, big files, huge logs, other accounts, growth) find what they should and nothing else. A test checks that every rule has its texts in `rules.en.json`. The scanner gives the same result whatever order the workers meet hard-linked names in (30 shuffled runs).
 
 ### API (`httptest`, fake system)
 

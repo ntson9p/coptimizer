@@ -4,9 +4,10 @@ import { connectEvents } from './events.js';
 import { loadStrings, t } from './i18n.js';
 import { store } from './store.js';
 import * as explorer from './views/explorer.js';
+import * as findings from './views/findings.js';
 import * as overview from './views/overview.js';
 
-const views = { overview, explorer };
+const views = { overview, findings, explorer };
 let unmount = null;
 let stopEvents = null;
 
@@ -21,8 +22,8 @@ async function main() {
   }
   if (!signedIn) return showMessage(t('locked.title'), t('locked.body'));
   try {
-    const [status, drives] = await Promise.all([api.status(), api.drives()]);
-    store.set({ status, drives, scan: status.lastScan, progress: status.lastScan?.progress ?? null });
+    const [status, drives, system] = await Promise.all([api.status(), api.drives(), api.system()]);
+    store.set({ status, drives, system: system.probes, scan: status.lastScan, progress: status.lastScan?.progress ?? null });
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return showMessage(t('locked.title'), t('locked.body'));
     return showMessage(t('error.title'), t('error.generic', { message: e.message }));
@@ -51,6 +52,11 @@ function onEvent(type, data) {
       store.set({ scan: data, progress: data.progress });
       api.drives().then((drives) => store.set({ drives }), () => {});
       break;
+    case 'system.updated': {
+      const others = store.state.system.filter((p) => p.name !== data.name);
+      store.set({ system: [...others, data] });
+      break;
+    }
   }
 }
 
@@ -77,6 +83,7 @@ function renderChrome() {
   document.getElementById('app-name').textContent = t('app.name');
   document.getElementById('tabs').replaceChildren(
     h('a', { href: '#/', 'data-route': 'overview' }, t('nav.overview')),
+    h('a', { href: '#/findings', 'data-route': 'findings' }, t('nav.findings')),
     h('a', { href: '#/explorer', 'data-route': 'explorer' }, t('nav.explorer')),
   );
   const quit = document.getElementById('quit');

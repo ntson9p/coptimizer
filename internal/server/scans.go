@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ntson9p/coptimizer/internal/fsx"
+	"github.com/ntson9p/coptimizer/internal/rules"
 	"github.com/ntson9p/coptimizer/internal/scan"
 	"github.com/ntson9p/coptimizer/internal/sysinfo"
 )
@@ -16,12 +17,21 @@ import (
 // keepScans is how many finished scans stay in memory.
 const keepScans = 3
 
+// SnapshotStore keeps snapshots of earlier scans, to find what grew.
+type SnapshotStore interface {
+	Previous(root string, elevated bool) (rules.Snapshot, bool)
+	Add(rules.Snapshot) error
+}
+
 // scans runs one scan at a time and keeps the last few results.
 type scans struct {
-	lister fsx.Lister
-	system sysinfo.Reader
-	hub    *hub
-	now    func() time.Time
+	lister    fsx.Lister
+	system    sysinfo.Reader
+	env       rules.Env
+	snapshots SnapshotStore // may be nil
+	hub       *hub
+	now       func() time.Time
+	logf      func(format string, args ...any)
 
 	mu      sync.Mutex
 	next    int
@@ -40,11 +50,13 @@ type scanJob struct {
 	used     int64 // space in use on the scanned drives when the scan started
 	progress scan.Progress
 	result   *scan.Result
+	report   *rules.Report
 	cancel   context.CancelFunc
 }
 
-func newScans(l fsx.Lister, sys sysinfo.Reader, h *hub, now func() time.Time) *scans {
-	return &scans{lister: l, system: sys, hub: h, now: now, byID: make(map[string]*scanJob)}
+func newScans(cfg Config, h *hub) *scans {
+	return &scans{lister: cfg.Lister, system: cfg.System, env: cfg.Env, snapshots: cfg.Snapshots, hub: h,
+		now: cfg.Now, logf: cfg.Logf, byID: make(map[string]*scanJob)}
 }
 
 // start begins a scan of whole drives, given as roots like `C:\`.
@@ -103,8 +115,13 @@ func (m *scans) run(ctx context.Context, j *scanJob) {
 		m.mu.Unlock()
 		m.hub.publish("scan.progress", v, false)
 	}})
+	finished := m.now()
+	var report *rules.Report
+	if err == nil {
+		report = m.evaluate(res, finished)
+	}
 	m.mu.Lock()
-	j.finished = m.now()
+	j.finished = finished
 	j.cancel()
 	if m.running == j {
 		m.running = nil
@@ -115,11 +132,35 @@ func (m *scans) run(ctx context.Context, j *scanJob) {
 	case err != nil:
 		j.state, j.err = "failed", err.Error()
 	default:
-		j.state, j.result = "done", res
+		j.state, j.result, j.report = "done", res, report
 	}
 	v := j.view()
 	m.mu.Unlock()
 	m.hub.publish("scan.finished", v, true)
+}
+
+// evaluate finds the space hogs in a finished scan, comparing it with the
+// previous scan of the same drives taken with the same rights, then keeps a
+// snapshot of this one for next time.
+func (m *scans) evaluate(res *scan.Result, at time.Time) *rules.Report {
+	elevated := m.system.Elevated()
+	var previous []rules.Snapshot
+	if m.snapshots != nil {
+		for _, root := range res.Roots {
+			if p, ok := m.snapshots.Previous(root.Name, elevated); ok {
+				previous = append(previous, p)
+			}
+		}
+	}
+	rep := rules.Evaluate(res, m.env, rules.Options{Previous: previous})
+	if m.snapshots != nil {
+		for _, root := range res.Roots {
+			if err := m.snapshots.Add(rules.TakeSnapshot(root, at, elevated)); err != nil {
+				m.logf("could not keep a snapshot of the scan of %s: %v", root.Name, err)
+			}
+		}
+	}
+	return &rep
 }
 
 // get returns the scan with the given ID.
@@ -133,18 +174,18 @@ func (m *scans) get(id string) (*scanJob, error) {
 	return j, nil
 }
 
-// result returns the result of a finished scan.
-func (m *scans) result(id string) (*scan.Result, error) {
+// result returns the result of a finished scan and its findings.
+func (m *scans) result(id string) (*scan.Result, *rules.Report, error) {
 	j, err := m.get(id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if j.result == nil {
-		return nil, &apiError{Status: 409, Code: "not_ready", Message: "the scan has no result (yet)"}
+		return nil, nil, &apiError{Status: 409, Code: "not_ready", Message: "the scan has no result (yet)"}
 	}
-	return j.result, nil
+	return j.result, j.report, nil
 }
 
 func (m *scans) cancel(id string) (scanView, error) {
@@ -218,15 +259,16 @@ type progressView struct {
 }
 
 type summaryView struct {
-	Files       int64    `json:"files"`
-	Folders     int64    `json:"folders"`
-	Errors      int64    `json:"errors"`
-	Size        int64    `json:"size"`
-	Allocated   int64    `json:"allocated"`
-	Shared      int64    `json:"shared"`
-	CloudOnly   int64    `json:"cloudOnly"`
-	Unaccounted int64    `json:"unaccounted"`
-	Denied      []string `json:"denied"`
+	Files       int64                `json:"files"`
+	Folders     int64                `json:"folders"`
+	Errors      int64                `json:"errors"`
+	Size        int64                `json:"size"`
+	Allocated   int64                `json:"allocated"`
+	Shared      int64                `json:"shared"`
+	CloudOnly   int64                `json:"cloudOnly"`
+	Unaccounted int64                `json:"unaccounted"`
+	Denied      []string             `json:"denied"`
+	Totals      map[rules.Risk]int64 `json:"totals"` // findings by risk
 }
 
 func (j *scanJob) view() scanView {
@@ -245,6 +287,9 @@ func (j *scanJob) view() scanView {
 			Size: r.Size, Allocated: r.Allocated, Shared: r.Shared, CloudOnly: r.CloudOnly,
 			Unaccounted: max(0, j.used-r.Allocated),
 			Denied:      append([]string{}, denied...),
+		}
+		if j.report != nil {
+			v.Summary.Totals = j.report.Totals
 		}
 	}
 	return v

@@ -5,6 +5,7 @@ export const store = {
     drives: [],
     scan: null, // the latest scan
     progress: null, // the latest progress of that scan
+    system: [], // the latest result of each probe
     conn: 'connecting',
   },
   listeners: new Set(),

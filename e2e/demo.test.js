@@ -86,6 +86,40 @@ test('scan the demo PC and explore the result', async () => {
   assert.match(await junction.innerText(), /link, not followed/);
   assert.equal(await junction.evaluate((el) => el.tagName), 'DIV');
 
+  // Findings: the totals, a card with its how-to, growth, a cache-like folder.
+  await page.getByRole('link', { name: 'Findings' }).click();
+  await page.getByRole('heading', { name: 'Findings' }).waitFor();
+  await page.locator('.tile', { hasText: 'Safe to clean' }).waitFor();
+  const npm = page.locator('article[data-id="dev.npm-cache"]');
+  await npm.waitFor();
+  assert.match(await npm.innerText(), /npm cache/);
+  await npm.locator('summary').click();
+  assert.equal(await npm.locator('.how code').first().innerText(), 'npm cache clean --force');
+  // Locations sit in collapsed details: textContent reads them anyway.
+  assert.match(await page.locator('article[data-id="other.growth"]').textContent(), /npm-cache\\_cacache.*grew \d/);
+  assert.match(await page.locator('article[data-id="other.unrecognized"]').textContent(), /VendorSync\\VideoCachelooks like a cache/);
+  await page.screenshot({ path: path.join(shots, '6-findings.png'), fullPage: true });
+
+  // Filtering by risk shows only that kind.
+  await page.locator('.tile', { hasText: 'Safe to clean' }).click();
+  assert.equal(await page.locator('article.finding:not(.risk-safe)').count(), 0);
+  assert.ok((await page.locator('article.finding.risk-safe').count()) > 5);
+  await page.locator('.tile', { hasText: 'Safe to clean' }).click();
+
+  // What Windows reports, and DISM's analysis on request.
+  const system = page.locator('.system-list');
+  await system.getByText(/hiberfil\.sys takes/).waitFor();
+  await system.getByText('Ubuntu-24.04').waitFor();
+  await system.getByRole('button', { name: 'Analyze' }).click();
+  await system.getByText(/could be cleaned up/).waitFor({ timeout: 20000 });
+  await page.screenshot({ path: path.join(shots, '7-system.png') });
+
+  // The overview now leads to the findings.
+  await page.getByRole('link', { name: 'Overview' }).click();
+  await page.getByRole('heading', { name: 'Biggest findings' }).waitFor();
+  assert.match(await page.locator('.reclaim').innerText(), /Safe to clean: \d/);
+  await page.screenshot({ path: path.join(shots, '8-overview-findings.png'), fullPage: true });
+
   assert.deepEqual(errors, [], 'the page logged errors');
   await page.close();
 });

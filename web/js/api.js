@@ -76,5 +76,8 @@ export const api = {
   tree: (id, path) => call('GET', `/api/scans/${q(id)}/tree?path=${q(path)}`),
   files: (id, path, limit) => call('GET', `/api/scans/${q(id)}/files?path=${q(path)}&limit=${limit}`),
   types: (id, limit) => call('GET', `/api/scans/${q(id)}/types?limit=${limit}`),
+  findings: (id) => call('GET', `/api/scans/${q(id)}/findings`),
+  system: () => call('GET', '/api/system'),
+  runProbe: (name) => call('POST', `/api/system/${q(name)}`),
   shutdown: () => call('POST', '/api/shutdown'),
 };

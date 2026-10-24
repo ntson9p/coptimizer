@@ -1,0 +1,355 @@
+{
+  "category.system": "Windows system files",
+  "category.updates": "Windows updates and upgrades",
+  "category.drivers": "Drivers and hardware vendors",
+  "category.virtual": "Virtual disks and emulators",
+  "category.dev": "Developer tools",
+  "category.ai": "Local AI",
+  "category.browsers": "Browsers",
+  "category.apps": "Mail, chat and cloud sync",
+  "category.media": "Media and creative apps",
+  "category.games": "Games",
+  "category.personal": "Personal files",
+  "category.other": "Everything else",
+
+  "risk.safe": "Safe to clean",
+  "risk.moderate": "Has trade-offs",
+  "risk.manual": "Your decision",
+  "risk.info": "Good to know",
+
+  "rule.system.hiberfil.title": "Hibernation file",
+  "rule.system.hiberfil.what": "hiberfil.sys holds the contents of memory for Hibernate and Fast Startup. Windows sizes it at about 40% of your RAM.",
+  "rule.system.hiberfil.how": "In an Administrator terminal, `powercfg /h /type reduced` shrinks it to about 20% of RAM (Fast Startup stays, Hibernate goes); `powercfg /h off` removes it and also turns off Fast Startup. `powercfg /h on` brings it back.",
+
+  "rule.system.pagefile.title": "Page file",
+  "rule.system.pagefile.what": "pagefile.sys is where Windows moves memory it needs to free. A system-managed page file grows with memory pressure.",
+  "rule.system.pagefile.how": "Never turn it off completely. System → Advanced system settings → Performance → Advanced → Virtual memory lets you put most of it on another internal drive; keep a small one on C: if you want crash dumps. Takes a restart.",
+
+  "rule.system.restore-points.title": "Restore points",
+  "rule.system.restore-points.what": "System Restore keeps copies of changed system files in System Volume Information, up to the limit set in System Protection. Measuring it needs Administrator rights.",
+  "rule.system.restore-points.how": "Disk Cleanup → Clean up system files → More Options → System Restore and Shadow Copies removes all but the newest restore point. To lower the limit: System Protection → Configure → Max Usage.",
+
+  "rule.system.component-store.title": "Windows component store (WinSxS)",
+  "rule.system.component-store.what": "WinSxS keeps Windows components and the older versions that updates replaced. The size shown leaves out files shared with the rest of Windows. Only part of it can be cleaned up; \"Analyze\" under What Windows reports asks DISM how much.",
+  "rule.system.component-store.how": "Never delete files from it by hand. Run `DISM /Online /Cleanup-Image /StartComponentCleanup` in an Administrator terminal, or Disk Cleanup's \"Windows Update Cleanup\". Adding `/ResetBase` frees more but makes the installed updates permanent.",
+
+  "rule.system.installer-cache.title": "Windows Installer cache",
+  "rule.system.installer-cache.what": "C:\\Windows\\Installer keeps the packages Windows needs to repair, update and uninstall programs.",
+  "rule.system.installer-cache.how": "Don't delete anything here: programs could no longer be repaired or uninstalled. Uninstalling programs you don't use makes it smaller.",
+
+  "rule.system.driver-store.title": "Driver store",
+  "rule.system.driver-store.what": "Windows keeps every driver version it has installed. Graphics drivers take about 1 GB per version.",
+  "rule.system.driver-store.how": "Disk Cleanup → Clean up system files → \"Device driver packages\" removes old versions. Advanced: `pnputil /enum-drivers` lists the packages; remove only old ones that aren't in use.",
+
+  "rule.system.search-index.title": "Search index",
+  "rule.system.search-index.what": "Windows Search keeps an index of your files and mail. It normally stays under 1 GB; a much bigger index is usually bloated or damaged.",
+  "rule.system.search-index.how": "Indexing Options → Advanced → Rebuild. Take huge folders and mailboxes you never search out of the indexed locations.",
+
+  "rule.system.memory-dumps.title": "Windows crash dumps",
+  "rule.system.memory-dumps.what": "After a blue screen or a driver timeout Windows saves memory dumps. MEMORY.DMP can be as large as your RAM.",
+  "rule.system.memory-dumps.how": "Once you no longer need them to find out what crashed, Disk Cleanup's \"System error memory dump files\" removes them, or delete the .dmp files.",
+
+  "rule.system.error-reports.title": "Error reports and app crash dumps",
+  "rule.system.error-reports.what": "Windows Error Reporting and crashing apps leave reports and dumps behind; an app crashing in a loop can leave gigabytes.",
+  "rule.system.error-reports.how": "Disk Cleanup's \"Windows Error Reporting files\", or delete the contents of these folders. Only diagnostic information is lost.",
+
+  "rule.system.logs.title": "System logs and traces",
+  "rule.system.logs.what": "Logs of Windows servicing (CBS, DISM, setup), diagnostic traces and web server logs. They normally stay small; a runaway log can take many gigabytes.",
+  "rule.system.logs.how": "Delete old .log, .cab and .etl files; Windows creates new ones as needed. For web server logs, set up log rotation.",
+
+  "rule.system.temp.title": "Windows temporary files",
+  "rule.system.temp.what": "Temporary files left by installers and Windows services.",
+  "rule.system.temp.how": "Settings → System → Storage → Temporary files, or delete files older than a day from these folders. Files in use are skipped.",
+
+  "rule.system.thumbnails.title": "Thumbnail and icon caches",
+  "rule.system.thumbnails.what": "Explorer keeps a thumbnail of every picture and video it has shown.",
+  "rule.system.thumbnails.how": "Disk Cleanup → \"Thumbnails\". Explorer rebuilds them as you browse.",
+
+  "rule.system.shader-caches.title": "Graphics shader caches",
+  "rule.system.shader-caches.what": "DirectX and the graphics drivers keep compiled shaders so that games start faster.",
+  "rule.system.shader-caches.how": "Disk Cleanup → \"DirectX Shader Cache\", or delete the contents of these folders. They are rebuilt; a game may stutter briefly the first time.",
+
+  "rule.system.print-queue.title": "Stuck print jobs",
+  "rule.system.print-queue.what": "Print jobs left behind in the print queue.",
+  "rule.system.print-queue.how": "Stop the Print Spooler service, delete the files in this folder, then start the service again.",
+
+  "rule.system.recall.title": "Recall snapshots",
+  "rule.system.recall.what": "On Copilot+ PCs, Recall saves snapshots of your screen up to a storage limit.",
+  "rule.system.recall.how": "Settings → Privacy & security → Recall & snapshots: delete snapshots or lower the storage limit.",
+
+  "rule.system.windows.title": "Windows itself",
+  "rule.system.windows.what": "The rest of the Windows folder: the operating system's own files.",
+  "rule.system.windows.how": "Nothing to clean here by hand. Compact OS (`compact /CompactOS:always`) can save 1.5–3 GB at a small CPU cost.",
+
+  "rule.system.programs.title": "Big installed programs",
+  "rule.system.programs.what": "Programs that take 500 MB or more, installed for everyone (Program Files) or just for you (AppData\\Local\\Programs).",
+  "rule.system.programs.how": "Uninstall what you no longer use in Settings → Apps → Installed apps. Never delete program folders by hand.",
+
+  "rule.updates.windows-old.title": "Previous Windows installation",
+  "rule.updates.windows-old.what": "Windows.old lets you go back to the previous Windows version after an upgrade. Windows normally removes it after 10 days.",
+  "rule.updates.windows-old.how": "Settings → System → Storage → Temporary files → \"Previous Windows installation(s)\". You can't go back afterwards. Deleting it by hand fails on permissions.",
+
+  "rule.updates.upgrade-files.title": "Upgrade staging files",
+  "rule.updates.upgrade-files.what": "Files that a Windows feature update or the Media Creation Tool downloaded and unpacked before upgrading.",
+  "rule.updates.upgrade-files.how": "When no upgrade is in progress: Disk Cleanup → Clean up system files → \"Temporary Windows installation files\".",
+
+  "rule.updates.update-assistant.title": "Update Assistant leftovers",
+  "rule.updates.update-assistant.what": "Downloads of the Windows Update Assistant and leftovers of \"Reset this PC\", often years old.",
+  "rule.updates.update-assistant.how": "When no upgrade is in progress, delete $GetCurrent and $SysReset. Uninstalling \"Windows 10 Update Assistant\" in Apps removes Windows10Upgrade.",
+
+  "rule.updates.download-cache.title": "Windows Update downloads",
+  "rule.updates.download-cache.what": "Updates Windows has downloaded. They are only needed until they're installed.",
+  "rule.updates.download-cache.how": "Disk Cleanup → Clean up system files → \"Windows Update Cleanup\".",
+
+  "rule.updates.delivery-optimization.title": "Delivery Optimization cache",
+  "rule.updates.delivery-optimization.what": "Windows keeps downloaded updates to share them with other PCs.",
+  "rule.updates.delivery-optimization.how": "Disk Cleanup → \"Delivery Optimization Files\", or `Delete-DeliveryOptimizationCache -Force` in an Administrator PowerShell.",
+
+  "rule.drivers.installers.title": "Driver installer files",
+  "rule.drivers.installers.what": "NVIDIA, AMD and Intel driver installers unpack about 1 GB for every update and leave it behind.",
+  "rule.drivers.installers.how": "Delete the contents of these folders once the driver is installed; the installed driver doesn't need them.",
+
+  "rule.drivers.oem-folders.title": "PC maker's driver folders",
+  "rule.drivers.oem-folders.what": "Copies of drivers and recovery tools that your PC's manufacturer put on C:.",
+  "rule.drivers.oem-folders.how": "Delete them only after checking that all drivers are installed; the manufacturer's website has them if you need them again.",
+
+  "rule.virtual.wsl.title": "WSL Linux disks",
+  "rule.virtual.wsl.what": "Each WSL distribution lives in a virtual disk that grows as you use it and doesn't shrink when you delete files inside Linux.",
+  "rule.virtual.wsl.how": "Clean up inside Linux first. `wsl --manage <distro> --set-sparse true` gives freed space back automatically; `wsl --manage <distro> --move D:\\WSL` moves the disk to another drive.",
+
+  "rule.virtual.docker.title": "Docker Desktop disk",
+  "rule.virtual.docker.what": "Images, containers, volumes and the build cache live in a virtual disk that doesn't shrink on its own.",
+  "rule.virtual.docker.how": "Check with `docker system df`, then `docker builder prune` and `docker image prune -a`. Remove volumes only if you're sure. Docker Desktop → Settings → Resources → Advanced → Disk image location moves the disk.",
+
+  "rule.virtual.vms.title": "Virtual machines",
+  "rule.virtual.vms.what": "Disks of Hyper-V, VirtualBox and VMware virtual machines, with their snapshots.",
+  "rule.virtual.vms.how": "Delete unused machines and old snapshots in the virtualization app, or move the machines to another drive.",
+
+  "rule.virtual.android.title": "Android emulators",
+  "rule.virtual.android.what": "Each emulator instance (Android Studio, BlueStacks, LDPlayer, Windows Subsystem for Android) is a full Android disk.",
+  "rule.virtual.android.how": "Delete unused devices or instances in the emulator's own manager. Windows Subsystem for Android has been discontinued: uninstall it.",
+
+  "rule.dev.node-modules.title": "node_modules folders",
+  "rule.dev.node-modules.what": "Dependencies of JavaScript projects. Each project's lock file can install them again.",
+  "rule.dev.node-modules.how": "Delete node_modules in projects you're not working on, and run `npm install` (or pnpm, yarn) when you come back to them.",
+
+  "rule.dev.npm-cache.title": "npm cache",
+  "rule.dev.npm-cache.what": "npm keeps every package it has downloaded and never removes old ones.",
+  "rule.dev.npm-cache.how": "`npm cache clean --force`. To keep it off C: from now on: `npm config set cache D:\\npm-cache`.",
+
+  "rule.dev.pnpm.title": "pnpm cache and store",
+  "rule.dev.pnpm.what": "pnpm-cache holds package metadata; the store holds every package version your projects have used.",
+  "rule.dev.pnpm.how": "`pnpm store prune` removes the packages no project uses. The pnpm-cache folder can simply be deleted.",
+
+  "rule.dev.yarn-bun.title": "Yarn and Bun caches",
+  "rule.dev.yarn-bun.what": "Packages that Yarn and Bun have downloaded.",
+  "rule.dev.yarn-bun.how": "`yarn cache clean` and `bun pm cache rm`.",
+
+  "rule.dev.browser-testing.title": "Browsers for automated tests",
+  "rule.dev.browser-testing.what": "Playwright, Puppeteer and Cypress download browsers of their own, a new set for each version.",
+  "rule.dev.browser-testing.how": "`npx playwright uninstall --all` and `npx cypress cache prune`, or delete the folders; tests download what they need again.",
+
+  "rule.dev.python.title": "Python package caches",
+  "rule.dev.python.what": "pip, uv and Poetry keep every package they have downloaded.",
+  "rule.dev.python.how": "`pip cache purge`, `uv cache clean` and `poetry cache clear --all pypi`.",
+
+  "rule.dev.conda.title": "Conda packages",
+  "rule.dev.conda.what": "Conda keeps package archives and old versions after installing them.",
+  "rule.dev.conda.how": "`conda clean --all`. Remove environments you no longer use with `conda env remove -n <name>`.",
+
+  "rule.dev.nuget.title": "NuGet packages",
+  "rule.dev.nuget.what": "Every .NET package version your projects have restored.",
+  "rule.dev.nuget.how": "`dotnet nuget locals all --clear`; projects restore what they need on their next build.",
+
+  "rule.dev.gradle-maven.title": "Gradle and Maven caches",
+  "rule.dev.gradle-maven.what": "Java and Android dependencies, and every Gradle version the wrapper has downloaded.",
+  "rule.dev.gradle-maven.how": "Run `gradle --stop`, then delete the caches folder and old Gradle versions in wrapper\\dists. The Maven repository can be deleted too; both download again on demand.",
+
+  "rule.dev.go.title": "Go caches",
+  "rule.dev.go.what": "Go's build cache and module cache.",
+  "rule.dev.go.how": "`go clean -cache` and `go clean -modcache`.",
+
+  "rule.dev.rust.title": "Cargo caches",
+  "rule.dev.rust.what": "Crates that Cargo has downloaded.",
+  "rule.dev.rust.how": "Delete the registry and git cache folders, or use a tool like cargo-cache; Cargo downloads what it needs again. `cargo clean` in a project removes its build output.",
+
+  "rule.dev.other-caches.title": "Other developer caches",
+  "rule.dev.other-caches.what": "Downloads kept by Electron, node-gyp, Composer, Dart and Flutter, Deno, Scoop, Chocolatey and winget.",
+  "rule.dev.other-caches.how": "Use each tool's own command (`composer clear-cache`, `flutter pub cache clean`, `deno clean`, `scoop cache rm *`) or delete the folders; they download again when needed.",
+
+  "rule.dev.vs-installer-cache.title": "Visual Studio download cache",
+  "rule.dev.vs-installer-cache.what": "Packages the Visual Studio Installer keeps to repair or change your installation.",
+  "rule.dev.vs-installer-cache.how": "Turn off the installer's download cache (the `--nocache` option or the KeepDownloadedPayloads policy). Repairs then download again.",
+
+  "rule.dev.vs-caches.title": "Visual Studio caches",
+  "rule.dev.vs-caches.what": "Downloaded debug symbols and Visual Studio's component cache.",
+  "rule.dev.vs-caches.how": "Close Visual Studio, then delete these folders; it rebuilds them.",
+
+  "rule.dev.package-cache.title": "Installer package cache",
+  "rule.dev.package-cache.what": "Package Cache holds installers that Visual Studio, .NET and the Visual C++ runtimes need to repair and uninstall themselves.",
+  "rule.dev.package-cache.how": "Don't delete it. Uninstalling programs you don't use makes it smaller.",
+
+  "rule.dev.toolchains.title": "Developer toolchains",
+  "rule.dev.toolchains.what": "Versions of Node, Python, Java, .NET, Rust, the Windows SDK and CUDA installed side by side; updates add new versions without removing old ones.",
+  "rule.dev.toolchains.how": "Remove versions you no longer use with their own tool (`nvm uninstall`, `rustup toolchain uninstall`, …) or in Settings → Apps.",
+
+  "rule.dev.android-sdk.title": "Android SDK",
+  "rule.dev.android-sdk.what": "Android platforms, system images, build tools and NDKs, often in many versions.",
+  "rule.dev.android-sdk.how": "In Android Studio's SDK Manager, uninstall the platforms, images and NDKs you no longer use.",
+
+  "rule.dev.editor-caches.title": "Code editor caches",
+  "rule.dev.editor-caches.what": "Caches and logs of VS Code, Cursor and Windsurf.",
+  "rule.dev.editor-caches.how": "Close the editor, then delete these folders; it rebuilds them.",
+
+  "rule.dev.editor-workspaces.title": "Code editor workspace data",
+  "rule.dev.editor-workspaces.what": "Data that VS Code-like editors keep per workspace, including extension state and AI chat history.",
+  "rule.dev.editor-workspaces.how": "Delete the folders of workspaces you no longer open. Their editor state and chat history go with them.",
+
+  "rule.dev.editor-extensions.title": "Code editor extensions",
+  "rule.dev.editor-extensions.what": "Extensions installed in VS Code, Cursor and Windsurf.",
+  "rule.dev.editor-extensions.how": "Uninstall the extensions you don't use in the editor's Extensions view.",
+
+  "rule.dev.jetbrains.title": "JetBrains IDE caches",
+  "rule.dev.jetbrains.what": "Caches, indexes and logs of JetBrains IDEs. Those of older IDE versions stay behind after upgrades.",
+  "rule.dev.jetbrains.how": "Close the IDE, then delete the folders of versions you no longer have installed; for the current version use File → Invalidate Caches.",
+
+  "rule.dev.game-engines.title": "Game engine caches",
+  "rule.dev.game-engines.what": "Unreal Engine's derived data cache and Unity's package caches.",
+  "rule.dev.game-engines.how": "Delete them with the editors closed; they are rebuilt, slowly, when needed.",
+
+  "rule.dev.minikube.title": "Minikube",
+  "rule.dev.minikube.what": "The virtual machine and images of a local Kubernetes cluster.",
+  "rule.dev.minikube.how": "`minikube delete` removes the cluster.",
+
+  "rule.ai.ollama.title": "Ollama models",
+  "rule.ai.ollama.what": "Local AI models, often 2–40 GB each.",
+  "rule.ai.ollama.how": "`ollama list` shows them and `ollama rm <model>` removes one. The OLLAMA_MODELS variable keeps models on another drive.",
+
+  "rule.ai.huggingface.title": "Hugging Face cache",
+  "rule.ai.huggingface.what": "Every model and dataset revision downloaded by transformers, diffusers and other Hugging Face libraries.",
+  "rule.ai.huggingface.how": "`huggingface-cli delete-cache` lets you pick what to remove. The HF_HOME variable keeps the cache on another drive.",
+
+  "rule.ai.lmstudio.title": "LM Studio models",
+  "rule.ai.lmstudio.what": "Models downloaded in LM Studio.",
+  "rule.ai.lmstudio.how": "Delete models in LM Studio's My Models, or point its models folder to another drive.",
+
+  "rule.ai.torch.title": "PyTorch hub cache",
+  "rule.ai.torch.what": "Models and weights downloaded through torch.hub.",
+  "rule.ai.torch.how": "Delete the folder; they download again when needed.",
+
+  "rule.ai.chrome-model.title": "Chrome's on-device AI model",
+  "rule.ai.chrome-model.what": "Chrome downloads the Gemini Nano model for its on-device AI features.",
+  "rule.ai.chrome-model.how": "Delete the folder. Chrome downloads it again unless on-device AI is turned off (in Chrome's settings, or with the GenAILocalFoundationalModelSettings policy).",
+
+  "rule.browsers.chrome-cache.title": "Google Chrome caches",
+  "rule.browsers.chrome-cache.what": "Web page and code caches of every Chrome profile.",
+  "rule.browsers.chrome-cache.how": "Close Chrome, then delete these folders, or clear \"Cached images and files\" in Chrome. Logins, history and settings stay.",
+
+  "rule.browsers.edge-cache.title": "Microsoft Edge caches",
+  "rule.browsers.edge-cache.what": "Web page and code caches of every Edge profile.",
+  "rule.browsers.edge-cache.how": "Close Edge, then delete these folders, or clear \"Cached images and files\" in Edge. Logins, history and settings stay.",
+
+  "rule.browsers.other-cache.title": "Other browser caches",
+  "rule.browsers.other-cache.what": "Caches of Brave, Vivaldi, Cốc Cốc, Opera and Firefox.",
+  "rule.browsers.other-cache.how": "Close the browser, then delete these folders, or clear its cache in its settings.",
+
+  "rule.browsers.profile-data.title": "Browser profile data",
+  "rule.browsers.profile-data.what": "Everything besides the caches: site data, offline data of web apps, extensions and history.",
+  "rule.browsers.profile-data.how": "Clear the data of sites you no longer use (in the browser's site settings) and remove unused extensions and profiles. Don't delete these folders by hand.",
+
+  "rule.apps.outlook.title": "Outlook mailbox files",
+  "rule.apps.outlook.what": "Outlook keeps an offline copy of your mailbox (.ost) and archives (.pst).",
+  "rule.apps.outlook.how": "Lower \"Download email for the past\" in the account settings to shrink the .ost. Keep .pst archives on another drive.",
+
+  "rule.apps.teams-cache.title": "Microsoft Teams cache",
+  "rule.apps.teams-cache.what": "Data Teams keeps to load faster.",
+  "rule.apps.teams-cache.how": "Quit Teams, then delete these folders, or use Settings → Apps → Microsoft Teams → Reset.",
+
+  "rule.apps.chat-caches.title": "Chat app caches",
+  "rule.apps.chat-caches.what": "The caches of Slack, Discord, Zalo and Signal.",
+  "rule.apps.chat-caches.how": "Quit the app, then delete these cache folders. Only these: the rest of the app's folder holds chats and logins.",
+
+  "rule.apps.chat-data.title": "Chat history and media",
+  "rule.apps.chat-data.what": "Messages, photos, videos and files of Zalo, Telegram and WhatsApp stored on this PC.",
+  "rule.apps.chat-data.how": "Use each app's own storage manager (Telegram: Settings → Advanced → Manage local storage). Don't delete these folders by hand.",
+
+  "rule.apps.cloud-sync.title": "Cloud drive files kept on this PC",
+  "rule.apps.cloud-sync.what": "Files of OneDrive, Google Drive, Dropbox and iCloud that are stored on this PC, not only online.",
+  "rule.apps.cloud-sync.how": "Make files you rarely use online-only: right-click → \"Free up space\" in OneDrive, or the equivalent in the other apps.",
+
+  "rule.apps.phone-backups.title": "iPhone and iPad backups",
+  "rule.apps.phone-backups.what": "Backups made by iTunes or Apple Devices; each one is a full copy of a device.",
+  "rule.apps.phone-backups.how": "In Apple Devices or iTunes → Manage Backups, delete the backups you no longer need.",
+
+  "rule.apps.office-cache.title": "Office file cache",
+  "rule.apps.office-cache.what": "Microsoft Office's cache of documents from OneDrive and SharePoint.",
+  "rule.apps.office-cache.how": "Close Office, then delete the folder.",
+
+  "rule.media.editing-caches.title": "Video and photo editing caches",
+  "rule.media.editing-caches.what": "The media caches of Premiere Pro and After Effects, CapCut's cache and Photoshop's scratch files.",
+  "rule.media.editing-caches.how": "Use the app's own cleanup (Premiere: Preferences → Media Cache → Delete; CapCut: its settings). Delete Photoshop Temp files with Photoshop closed.",
+
+  "rule.media.lightroom-previews.title": "Lightroom previews",
+  "rule.media.lightroom-previews.what": "Preview images Lightroom Classic builds for your catalog.",
+  "rule.media.lightroom-previews.how": "Library → Previews → Discard 1:1 Previews, and set them to be discarded automatically.",
+
+  "rule.media.recordings.title": "Screen and game recordings",
+  "rule.media.recordings.what": "Clips saved by the Xbox Game Bar.",
+  "rule.media.recordings.how": "Go through them and delete or move the ones you don't need.",
+
+  "rule.media.music-video.title": "Offline music and video",
+  "rule.media.music-video.what": "Songs and videos that Spotify and Netflix keep for offline use.",
+  "rule.media.music-video.how": "Remove downloads in the app, or change where it stores them.",
+
+  "rule.games.installed.title": "Installed games",
+  "rule.games.installed.what": "Games from Steam, Epic, the Xbox app, Riot, EA and Ubisoft.",
+  "rule.games.installed.how": "Uninstall games you don't play, or move them with the launcher's own tool (Steam → Settings → Storage).",
+
+  "rule.games.leftovers.title": "Game launcher leftovers",
+  "rule.games.leftovers.what": "Steam's shader cache, unfinished downloads and crash dumps, and Epic's Vault cache.",
+  "rule.games.leftovers.how": "Delete these folders with the launcher closed; shader caches are rebuilt as you play.",
+
+  "rule.personal.downloads.title": "Downloads",
+  "rule.personal.downloads.what": "Installers, disk images, archives and videos downloaded over time.",
+  "rule.personal.downloads.how": "Sort by size or date in Explorer and delete what you no longer need. You can also move the whole folder to another drive (folder Properties → Location).",
+
+  "rule.personal.desktop-documents.title": "Desktop and Documents",
+  "rule.personal.desktop-documents.what": "Your own files.",
+  "rule.personal.desktop-documents.how": "Look at the biggest files and folders in the Explorer view; move them to another drive or delete what you don't need.",
+
+  "rule.personal.media.title": "Videos, Pictures and Music",
+  "rule.personal.media.what": "Your photos, videos and music.",
+  "rule.personal.media.how": "Move the folders to another drive (folder Properties → Location) or to cloud storage.",
+
+  "rule.personal.recycle-bin.title": "Recycle Bin",
+  "rule.personal.recycle-bin.what": "Deleted files keep using space until the Recycle Bin is emptied.",
+  "rule.personal.recycle-bin.how": "Check that there's nothing you want back, then right-click the Recycle Bin → Empty Recycle Bin.",
+
+  "rule.personal.temp.title": "Your temporary files",
+  "rule.personal.temp.what": "Temporary files that apps and installers forgot to clean up.",
+  "rule.personal.temp.how": "Settings → System → Storage → Temporary files, or delete files older than a day from this folder. Files in use are skipped.",
+
+  "rule.personal.other-accounts.title": "Other user accounts",
+  "rule.personal.other-accounts.what": "Files of the other accounts on this PC, besides their caches.",
+  "rule.personal.other-accounts.how": "If an account is no longer used, save any files you need from it, then remove it in Settings → Accounts → Other users.",
+
+  "rule.personal.big-files.title": "Big files",
+  "rule.personal.big-files.what": "Files of 1 GB or more that no other finding covers.",
+  "rule.personal.big-files.how": "Check what each one is; delete or move the ones you don't need.",
+
+  "rule.other.defender-history.title": "Microsoft Defender history",
+  "rule.other.defender-history.what": "Detection history and quarantined items of Microsoft Defender.",
+  "rule.other.defender-history.how": "Windows Security → Virus & threat protection → Protection history; remove old items there.",
+
+  "rule.other.big-logs.title": "Huge log files",
+  "rule.other.big-logs.what": "Log or trace files of 500 MB or more, usually from a program that logs without limit.",
+  "rule.other.big-logs.how": "Find out which program writes the file. Delete it with that program closed, and change the program's logging settings.",
+
+  "rule.other.unrecognized.title": "Big folders no rule explains",
+  "rule.other.unrecognized.what": "Folders holding 1 GB or more that COptimizer doesn't recognize.",
+  "rule.other.unrecognized.how": "Look inside in the Explorer view. Folders marked \"looks like a cache\" usually hold data that can be rebuilt, but check before deleting anything.",
+
+  "rule.other.growth.title": "Grew since the last scan",
+  "rule.other.growth.what": "Folders that grew by 512 MB or more since the earlier scan.",
+  "rule.other.growth.how": "Fast growth often means a cache, log or download folder filling up; the other findings or the Explorer view show what it is."
+}

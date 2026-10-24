@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ntson9p/coptimizer/internal/fsx/memfs"
+	"github.com/ntson9p/coptimizer/internal/rules"
 	"github.com/ntson9p/coptimizer/internal/server"
 	"github.com/ntson9p/coptimizer/internal/sysinfo"
 	"github.com/ntson9p/coptimizer/internal/testguard"
@@ -39,7 +40,7 @@ type fixture struct {
 	stopped atomic.Bool
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T, options ...func(*server.Config)) *fixture {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -50,13 +51,14 @@ func newFixture(t *testing.T) *fixture {
 	f.fs.AddFile(`C:\Windows\big.dll`, 3<<20, time.Now())
 	f.fs.AddFile(`C:\Users\demo\video.mp4`, 7<<20, time.Now())
 	f.fs.AddFile(`C:\Users\demo\notes.txt`, 100, time.Now())
-	f.srv = server.New(server.Config{
+	cfg := server.Config{
 		Port:       ln.Addr().(*net.TCPAddr).Port,
 		LaunchCode: "launch1",
 		Instance:   "inst",
 		Version:    "test",
 		Lister:     f.fs,
 		System:     fakeSystem{},
+		Env:        rules.DefaultEnv("demo"),
 		Web: fstest.MapFS{
 			"index.html":  {Data: []byte("<!doctype html><title>t</title>")},
 			"js/main.js":  {Data: []byte("export {}")},
@@ -64,7 +66,11 @@ func newFixture(t *testing.T) *fixture {
 		},
 		Shutdown: func() { f.stopped.Store(true) },
 		Now:      func() time.Time { return time.Unix(f.now.Load(), 0) },
-	})
+	}
+	for _, o := range options {
+		o(&cfg)
+	}
+	f.srv = server.New(cfg)
 	f.ts = &httptest.Server{Listener: ln, Config: &http.Server{Handler: f.srv}}
 	f.ts.Start()
 	t.Cleanup(func() {

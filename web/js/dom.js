@@ -15,6 +15,12 @@ export function h(tag, props, ...children) {
   return el;
 }
 
+// rich turns text with `backtick` spans into text and <code> nodes: rule
+// texts write commands that way.
+export function rich(text) {
+  return text.split('`').map((part, i) => (i % 2 ? h('code', {}, part) : part));
+}
+
 // bar draws a horizontal bar filled to fraction (0–1).
 export function bar(fraction, className = '') {
   const fill = h('span', { class: 'fill' });

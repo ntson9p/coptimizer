@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/ntson9p/coptimizer/internal/fsx"
+	"github.com/ntson9p/coptimizer/internal/probe"
+	"github.com/ntson9p/coptimizer/internal/rules"
 	"github.com/ntson9p/coptimizer/internal/scan"
 	"github.com/ntson9p/coptimizer/internal/sysinfo"
 )
@@ -31,7 +33,10 @@ type Config struct {
 	Demo       bool
 	Lister     fsx.Lister
 	System     sysinfo.Reader
-	Web        fs.FS // the web page; index.html at the top
+	Env        rules.Env     // where Windows keeps things, for the findings
+	Snapshots  SnapshotStore // earlier scans, for growth; nil: none kept
+	Probes     *probe.Deps   // for the system information; nil: none
+	Web        fs.FS         // the web page; index.html at the top
 	Logf       func(format string, args ...any)
 	Shutdown   func()           // called when the page asks the server to stop
 	Now        func() time.Time // nil means time.Now
@@ -44,6 +49,7 @@ type Server struct {
 	sessions *sessions
 	hub      *hub
 	scans    *scans
+	probes   *probe.Manager // nil without Config.Probes
 	handler  http.Handler
 }
 
@@ -62,9 +68,13 @@ func New(cfg Config) *Server {
 			s.user = u.Username
 		}
 	}
-	s.scans = newScans(cfg.Lister, cfg.System, s.hub, cfg.Now)
+	s.scans = newScans(cfg, s.hub)
 	if cfg.LaunchCode != "" {
 		s.sessions.addCode(cfg.LaunchCode)
+	}
+	if cfg.Probes != nil {
+		s.probes = probe.NewManager(*cfg.Probes, func(r probe.Result) { s.hub.publish("system.updated", r, true) })
+		s.probes.Start()
 	}
 
 	mux := http.NewServeMux()
@@ -79,6 +89,9 @@ func New(cfg Config) *Server {
 	mux.Handle("GET /api/scans/{id}/tree", s.api(s.tree, true))
 	mux.Handle("GET /api/scans/{id}/files", s.api(s.files, true))
 	mux.Handle("GET /api/scans/{id}/types", s.api(s.types, true))
+	mux.Handle("GET /api/scans/{id}/findings", s.api(s.findings, true))
+	mux.Handle("GET /api/system", s.api(s.system, true))
+	mux.Handle("POST /api/system/{name}", s.api(s.runProbe, true))
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.Handle("POST /api/shutdown", s.api(s.shutdown, true))
 	mux.Handle("GET /api/", s.api(func(*http.Request) (any, error) {
@@ -98,9 +111,13 @@ func (s *Server) Link(code string) string {
 // NewLaunchLink makes another one-time code and returns the link using it.
 func (s *Server) NewLaunchLink() string { return s.Link(s.sessions.newCode()) }
 
-// Close stops a running scan and ends open event streams.
+// Close stops a running scan and running probes, and ends open event
+// streams.
 func (s *Server) Close() {
 	s.scans.cancelAll()
+	if s.probes != nil {
+		s.probes.Close()
+	}
 	s.hub.close()
 }
 
@@ -276,7 +293,7 @@ type nodeView struct {
 const maxChildren = 500
 
 func (s *Server) tree(r *http.Request) (any, error) {
-	res, err := s.scans.result(r.PathValue("id"))
+	res, _, err := s.scans.result(r.PathValue("id"))
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +336,7 @@ type fileView struct {
 }
 
 func (s *Server) files(r *http.Request) (any, error) {
-	res, err := s.scans.result(r.PathValue("id"))
+	res, _, err := s.scans.result(r.PathValue("id"))
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +365,7 @@ type typeView struct {
 }
 
 func (s *Server) types(r *http.Request) (any, error) {
-	res, err := s.scans.result(r.PathValue("id"))
+	res, _, err := s.scans.result(r.PathValue("id"))
 	if err != nil {
 		return nil, err
 	}
@@ -358,6 +375,43 @@ func (s *Server) types(r *http.Request) (any, error) {
 		out = append(out, typeView{Ext: t.Ext, Files: t.Files, Size: t.Size, Allocated: t.Allocated})
 	}
 	return out, nil
+}
+
+type findingsView struct {
+	ScanID string `json:"scanId"`
+	rules.Report
+}
+
+func (s *Server) findings(r *http.Request) (any, error) {
+	id := r.PathValue("id")
+	_, rep, err := s.scans.result(id)
+	if err != nil {
+		return nil, err
+	}
+	return findingsView{ScanID: id, Report: *rep}, nil
+}
+
+func (s *Server) system(*http.Request) (any, error) {
+	results := []probe.Result{}
+	if s.probes != nil {
+		results = s.probes.Results()
+	}
+	return map[string]any{"probes": results}, nil
+}
+
+func (s *Server) runProbe(r *http.Request) (any, error) {
+	if s.probes == nil {
+		return nil, &apiError{Status: 404, Code: "not_found", Message: "no system information here"}
+	}
+	switch err := s.probes.Run(r.PathValue("name")); {
+	case errors.Is(err, probe.ErrUnknown):
+		return nil, &apiError{Status: 404, Code: "not_found", Message: "no such probe"}
+	case errors.Is(err, probe.ErrBusy):
+		return nil, &apiError{Status: 409, Code: "busy", Message: "this probe is already running"}
+	case err != nil:
+		return nil, err
+	}
+	return map[string]bool{"ok": true}, nil
 }
 
 func (s *Server) shutdown(*http.Request) (any, error) {

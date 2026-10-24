@@ -2,7 +2,7 @@
 
 Finds what is filling the Windows system drive (C:) and helps reclaim the space safely. A Go server runs as Administrator on `127.0.0.1`, and you control it from a page in your browser.
 
-**Status: phase 1 of 5.** COptimizer can scan a drive and show where the space goes: biggest folders, largest files, file types. It only reads; cleanups arrive in phase 3.
+**Status: phase 2 of 5.** COptimizer scans a drive, shows where the space goes, and recognizes 84 kinds of space hogs (caches, leftovers, virtual disks, AI models, personal files…), explaining for each how to reclaim the space by hand. It also flags big folders it doesn't recognize and what grew since the last scan. It only reads; cleanups arrive in phase 3.
 
 Try it: there are no releases yet, so build it with `scripts\build.ps1`, then run `dist\coptimizer.exe`:
 

@@ -1,6 +1,6 @@
 # COptimizer: implementation plan
 
-Status: phases 0 and 1 done (test safety fuses; read-only scanner, server, launcher and web page); phase 2 (findings) next. Companion documents: [space-hogs.md](space-hogs.md) (what the app looks for) and [testing.md](testing.md) (how it's tested without risking anyone's PC).
+Status: phases 0–2 done (test safety fuses; read-only scanner, server, launcher and web page; findings and system information); phase 3 (safe cleanups) next. Companion documents: [space-hogs.md](space-hogs.md) (what the app looks for) and [testing.md](testing.md) (how it's tested without risking anyone's PC).
 
 ## 1. Goal
 
@@ -184,21 +184,27 @@ Enumerates the handlers under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Ex
 
 ### 7.1 Model
 
+As built in phase 2 (`internal/rules`):
+
 ```go
 type Rule struct {
-    ID       string   // "dev.npm.cache"
-    Category Category // System, Updates, Drivers, Virtual, Dev, AI, Browsers, Apps, Media, Games, Personal, Other
-    Title    string
-    Explain  string   // what it is, why it grows
-    Effect   string   // what cleaning costs, how to undo it
-    Prevent  string   // how to stop it coming back
-    Risk     Risk     // Safe | Moderate | Manual
-    Scope    Scope    // System | PerUser (expanded for every profile)
-    Paths    []string // templates such as `{LocalAppData}\npm-cache`
-    Probe    Probe    // optional read-only detector (registry, CIM, docker, DISM…)
-    Actions  []ActionSpec
+    ID         string   // "dev.npm-cache"; its texts are rule.<ID>.title/.what/.how in web/i18n/rules.en.json
+    Category   Category // system, updates, drivers, virtual, dev, ai, browsers, apps, media, games, personal, other
+    Risk       Risk     // safe | moderate | manual | info (explains space; nothing to reclaim)
+    Folders    []string // patterns such as `{LocalAppData}\npm-cache`; * and ? allowed in a name
+    Files      []string // patterns looked up among the scan's largest files, e.g. `{LocalAppData}\wsl\*\ext4.vhdx`
+    Min        int64    // report the finding only from this total size on
+    ItemMin    int64    // list a single location only from this size on
+    Unreadable bool     // report the folder even when it couldn't be read (restore points)
+    // plus, for the few rules patterns can't express, a detector function
 }
+```
 
+Rules only look at the finished scan; they never read the disk themselves. Every location counts for one finding at most: the most specific pattern claims it first (deeper patterns, then those with fewer wildcards), and a broader pattern that covers it later only counts what is left. `Temp\SymbolCache` goes to the Visual Studio rule, the rest of `Temp` to the temp rule, and the findings add up without counting anything twice. Detectors run before the patterns (`node_modules` folders) or after them (other user accounts, huge log files, big files, unexplained folders, growth).
+
+Phase 3 adds the actions to rules:
+
+```go
 type ActionSpec struct {
     ID          string
     Label       string
@@ -212,7 +218,7 @@ type ActionSpec struct {
 }
 ```
 
-The catalog is plain Go, one file per category (`rules/catalog_dev.go`, …), and each rule points at its entry in space-hogs.md. Because rules are code, every one is type-checked and unit-tested.
+The catalog is plain Go (`rules/catalog.go`, 84 rules), following space-hogs.md section by section. The texts the page shows live in `web/i18n/rules.en.json`, so translating the findings is one file; a test checks that every rule has its texts and that no text is left over.
 
 ### 7.2 Per-user rules
 
@@ -220,28 +226,32 @@ Per-user rules run for every real profile in `C:\Users`, skipping `Default`, `Pu
 
 ### 7.3 Probes
 
-All read-only, each with a timeout, run in parallel.
+All read-only, each with a time limit (`internal/probe`).
 
-| Probe | Source |
-|---|---|
-| Drives and free space | `GetDiskFreeSpaceEx` |
-| Hibernation and page file | Directory entries for `hiberfil.sys` and `pagefile.sys`; registry `HibernateEnabled`, `HiberFileType`, `PagingFiles` |
-| Restore points | CIM `Win32_ShadowStorage` and `Win32_ShadowCopy`, as JSON |
-| Component store | `DISM /English /Online /Cleanup-Image /AnalyzeComponentStore` (takes 1–3 minutes, so only on demand) |
-| Reserved storage | `DISM /English /Online /Get-ReservedStorageState` |
-| Recycle Bin | `SHQueryRecycleBinW` per drive |
-| WSL | Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` (each distro's folder), plus `wsl.exe --list --verbose` (UTF-16 output) |
-| Docker | `docker system df --format "{{json .}}"` when Docker is running |
-| Installed programs | Uninstall registry keys (names, `EstimatedSize`) |
-| Running processes | Toolhelp32 snapshot |
-| Windows upgrade in progress | Setup processes running, or recent activity in `$Windows.~BT`; if so, upgrade-leftover cleanup is blocked |
+| Probe | Source | Status |
+|---|---|---|
+| Drives and free space | `GetDiskFreeSpaceEx` | phase 1 |
+| Hibernation and page files | Registry `HibernateEnabled`, `ExistingPageFiles`, `PagingFiles`; file sizes | phase 2 |
+| WSL | Registry `HKCU\…\Lxss` (each distribution's name and disk), without starting WSL | phase 2 |
+| Reserved storage | `dism.exe /Online /English /Get-ReservedStorageState` (needs admin) | phase 2 |
+| Component store | `dism.exe /Online /English /Cleanup-Image /AnalyzeComponentStore` (needs admin; minutes, so only when the user clicks Analyze) | phase 2 |
+| Restore points | Measured by the scan itself: `System Volume Information`, readable with Administrator rights | phase 2 |
+| Recycle Bin | Measured by the scan itself: `$Recycle.Bin` | phase 2 |
+| Restore point limit | `vssadmin` or CIM `Win32_ShadowStorage` | phase 4, with the restore-point actions |
+| Docker images and build cache | `docker system df`, run as the signed-in user (see below) | phase 3 |
+| Installed programs | Uninstall registry keys (names, `EstimatedSize`) | later (leftover detection) |
+| Running processes | Toolhelp32 snapshot | phase 3 (apps that must be closed) |
+| Windows upgrade in progress | Setup processes, recent activity in `$Windows.~BT` | phase 4 |
+
+**Never run user tools elevated.** The server runs as Administrator, and tools installed in folders the user can write to (`docker`, `npm`, `wsl`, everything under `AppData` or on the user PATH) could have been replaced by malware, which would then run with Administrator rights. Probes therefore only start Windows' own `dism.exe` from System32 (with System32 as the working folder). From phase 3, commands of user tools run as the signed-in user, through the unelevated launcher, never from the elevated server.
 
 ### 7.4 Smart findings beyond the catalog
 
-- **Unrecognized big folders**: anything of 1 GB or more (configurable) that no rule covers. It's flagged "looks like a cache" when its name says so (`cache`, `temp`, `logs`, `CrashDumps`, `GPUCache`, `Code Cache`, `shadercache`). Always Manual.
-- **Growth**: "grew 5.2 GB since 10 Oct", from snapshot diffs.
-- **Big files**: 500 MB or more outside system folders; installers, ISOs and archives in Downloads older than 30 days.
-- **Leftovers**: AppData and ProgramData folders that match no installed program.
+- **Unrecognized big folders** (built): folders holding 1 GB or more that no finding explains, reported as deep in the tree as possible, never general folders like a profile or AppData themselves. Flagged "looks like a cache" when the name says so (cache, temp, tmp, log, crash, dump, shader). Your decision.
+- **Growth** (built): folders that grew by 512 MB or more since the previous scan of the same drive taken with the same rights (with and without Administrator rights the scan sees different folders). Snapshots keep folders of 50 MB or more, the last 10 per drive, in `data\snapshots.json.gz`.
+- **Big files** (built): files of 1 GB or more outside Windows, Program Files and ProgramData that no other finding covers; **huge logs**: `.log` and `.etl` files of 500 MB or more.
+- **Other accounts and `node_modules`** (built): other users' profiles beyond their caches; `node_modules` folders of projects.
+- **Leftovers** (later): AppData and ProgramData folders that match no installed program.
 - **Duplicates** (phase 5): big files grouped by size, then by partial hash, then by full hash.
 - **Ranking**: by reclaimable size. "Quick wins" shows Safe items first, and the header shows totals per tier.
 - **Relocation advice**: when another drive has room, exact steps to move caches, WSL, Docker, the page file and user folders there.
@@ -270,14 +280,15 @@ afterwards: the affected folder is re-scanned and its finding updated
 | `POST /api/session` | Exchange the one-time launch code for a session token |
 | `GET /api/status` | Version, elevation, signed-in user, simulation mode, busy state |
 | `GET /api/drives` | Drives with size, used and free space |
-| `POST /api/scans` | Start a full scan of whole drives `{drives: ["C:\\"]}`; quick and folder scans come with phase 2 |
+| `POST /api/scans` | Start a full scan of whole drives `{drives: ["C:\\"]}`; quick and folder scans come with phase 3, to refresh after cleanups |
 | `GET /api/scans/{id}` | Scan state, progress, summary |
 | `DELETE /api/scans/{id}` | Cancel a scan |
 | `GET /api/scans/{id}/tree?path=…` | Children of a folder with sizes (lazy tree) |
 | `GET /api/scans/{id}/files?limit=…` | Largest files |
 | `GET /api/scans/{id}/types` | Totals by file type |
-| `GET /api/findings` | Findings by category, with tiers and available actions |
-| `POST /api/findings/{id}/probe` | Run a slow probe on demand (component store analysis) |
+| `GET /api/scans/{id}/findings` | The scan's findings, largest first, with totals per risk and the date growth is compared with |
+| `GET /api/system` | The latest result of every probe |
+| `POST /api/system/{name}` | Run a probe now (the component store analysis runs only this way) |
 | `POST /api/plans` | Create a plan (dry run) |
 | `POST /api/jobs` | Run an approved plan |
 | `GET /api/jobs`, `GET /api/jobs/{id}` | Jobs and their logs |
@@ -290,7 +301,7 @@ afterwards: the affected folder is re-scanned and its finding updated
 
 Errors look like `{"error": {"code": "plan_expired", "message": "…"}}`, with status 400, 401, 403, 404, 409 (busy or stale plan), 421 (wrong Host) or 500.
 
-Events: `hello`, `heartbeat` (every 15 s), `scan.started`, `scan.progress` (not kept for replay), `scan.finished`, `findings.updated`, `job.queued`, `job.started`, `job.progress`, `job.log`, `job.finished`, `drives.updated`. Each carries an ID; after a reconnect the client sends `Last-Event-ID` and the server replays from a 1,000-event buffer.
+Events: `hello`, `heartbeat` (every 15 s), `scan.started`, `scan.progress` (not kept for replay), `scan.finished` (findings ready), `system.updated` (a probe's new result), `job.queued`, `job.started`, `job.progress`, `job.log`, `job.finished`, `drives.updated`. Each carries an ID; after a reconnect the client sends `Last-Event-ID` and the server replays from a 1,000-event buffer.
 
 ## 10. Web client
 
@@ -349,8 +360,8 @@ Each phase ends with its tests passing, its manual checks done and a short demo.
 |---|---|---|
 | 0. Scaffold ✅ | Layout, `go.mod`, scripts, `.gitignore`, README, MIT `LICENSE`, `SECURITY.md`, CI workflow. **First**, so every later test is protected from day one: the `safety` fuses, the `sandbox` test helpers, `testguard` and the forbidden-API test | `scripts\test.ps1` runs green and refuses to run elevated; planted violations and a weakened fuse make the tests fail (met 24 Oct 2026) |
 | 1. Read-only core ✅ | `winfs` enumerator, scanner, drives probe, server (auth, Host and Origin checks, events), launcher and elevation, UI Overview + Explorer + progress, demo mode, browser tests | A full scan of C: works; folder totals match Explorer within ~1%; ~1M files take under 2 minutes; the codebase has no code yet that deletes files or changes settings. Measured 24 Oct 2026 on a 120 GB budget SATA SSD, without admin rights: 730k files and 185k folders in 104 s cold and 20 s warm; `Program Files` within 0.006% of PowerShell's count, same number of files. The elevated launch (UAC) still needs its first manual run |
-| 2. Findings | Rule engine, per-user expansion, probes (power, restore points, Recycle Bin, WSL, Docker, DISM on demand, reserved storage), detection for every category in space-hogs.md, unrecognized folders, snapshots and growth, Findings UI | On the author's PC the app finds, automatically, everything the manual scan in space-hogs.md (section 5) found |
-| 3. Safe actions | Safety policy, deleter (dry run and real), command runner, plans, jobs and history, Activity UI. Safe-tier actions: temp folders, Recycle Bin, package-manager caches, browser and Electron caches, shader caches, crash dumps and error reports, Delivery Optimization, Windows Update cleanup via Disk Cleanup, DISM StartComponentCleanup | Every action is covered by fake and sandbox tests; at least 5 have run for real on the author's PC, preview first, with measured results matching the estimate |
+| 2. Findings ✅ | Rule engine (84 rules) with per-user expansion and specific-before-general claiming; detectors for `node_modules`, other accounts, big files, huge logs, unexplained folders and growth; scan snapshots; deterministic hard-link counting; probes (power, WSL, reserved storage, component store on demand) through a job-object command runner; Findings page and system information | On the author's PC the app finds, automatically, everything the manual scan in space-hogs.md (section 5) found. Met 24 Oct 2026: the demo PC built from that scan shows every finding (tested), and a real read-only scan of the author's C: found what is still there (Playwright 2.6 GB, Chrome caches in 46 profile folders, pnpm and npm caches, …); hibernation, the page file and WSL had meanwhile been moved off C:, which the probes confirm. Two scans minutes apart report no growth |
+| 3. Safe actions | Safety policy, deleter (dry run and real), streaming for the command runner, plans, jobs and history, Activity UI, quick and folder scans to refresh after a cleanup. User tools' commands (`npm cache clean`, `docker system df`…) run as the signed-in user through the unelevated launcher, never from the elevated server. Safe-tier actions: temp folders, Recycle Bin, package-manager caches, browser and Electron caches, shader caches, crash dumps and error reports, Delivery Optimization, Windows Update cleanup via Disk Cleanup, DISM StartComponentCleanup | Every action is covered by fake and sandbox tests; at least 5 have run for real on the author's PC, preview first, with measured results matching the estimate |
 | 4. Moderate actions | Hibernation (reduced, off, on), restore points (keep newest, cap size), upgrade leftovers (`$GetCurrent`, `$Windows.~BT`, `$Windows.~WS`, `Windows.old` via Disk Cleanup), DISM `/ResetBase`, Compact OS, WSL sparse / compact / move, Docker prune (never volumes by default). Acknowledgement dialogs with undo steps | Dry runs checked on a real PC; real runs only on a disposable VM or CI runner, or deliberately by the person at the PC |
 | 5. Polish | Relocation advisor with one-click config changes (e.g. npm cache to D:), recycle selected personal files (an explicit per-file choice, sent to the Recycle Bin), duplicates, treemap, Vietnamese UI, packaging and signing | |
 | Later | NTFS master-file-table scanner, scheduled scans with notifications, arm64 build | |
@@ -364,6 +375,7 @@ Risks:
 - **Long DISM and Disk Cleanup runs** that can't be cancelled: the UI warns before starting and shows elapsed time.
 - **Memory for hard-link tracking on huge disks**: capped; past the cap, totals are marked approximate.
 - **Non-English Windows**: designed in, since translated output is never parsed.
+- **Programs run with Administrator rights**: only Windows' own tools from System32; user tools run as the signed-in user from phase 3 (section 7.3).
 
 Decisions made on 24 Oct 2026:
 

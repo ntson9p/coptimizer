@@ -60,6 +60,7 @@ type File struct {
 	Path            string
 	Size, Allocated int64
 	Modified        time.Time
+	FileID          uint64 // 0 if unknown
 }
 
 // TypeStat sums up the files with one extension.
@@ -103,15 +104,15 @@ func Run(ctx context.Context, l fsx.Lister, opts Options) (*Result, error) {
 	s := &state{ctx: ctx, lister: l, top: topFiles{n: topN}}
 	s.q.cond = sync.NewCond(&s.q.mu)
 	res := &Result{Started: time.Now()}
-	volumes := make(map[string]*idSet) // file IDs are unique per volume
+	volumes := make(map[string]*linkSet) // file IDs are unique per volume
 	for _, root := range opts.Roots {
 		vol := strings.ToUpper(filepath.VolumeName(root))
 		if volumes[vol] == nil {
-			volumes[vol] = new(idSet)
+			volumes[vol] = new(linkSet)
 		}
 		n := &Node{Name: root}
 		res.Roots = append(res.Roots, n)
-		s.q.push(job{node: n, path: root, seen: volumes[vol]})
+		s.q.push(job{node: n, path: root, links: volumes[vol]})
 	}
 
 	stop := context.AfterFunc(ctx, s.q.close)
@@ -121,16 +122,17 @@ func Run(ctx context.Context, l fsx.Lister, opts Options) (*Result, error) {
 		go s.report(opts.Progress, res.Started, done)
 	}
 	var wg sync.WaitGroup
-	types := make([]map[string]*TypeStat, workers)
+	workerState := make([]worker, workers)
 	for i := range workers {
-		types[i] = make(map[string]*TypeStat)
+		w := &workerState[i]
+		w.types = make(map[string]*TypeStat)
 		wg.Go(func() {
 			for {
 				j, ok := s.q.pop()
 				if !ok {
 					return
 				}
-				s.process(j, types[i])
+				s.process(j, w)
 				s.q.done()
 			}
 		})
@@ -140,6 +142,19 @@ func Run(ctx context.Context, l fsx.Lister, opts Options) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
+	// Hard-link decisions that moved a file's size away from a folder another
+	// worker was listing are applied now that every worker has finished.
+	types := make([]map[string]*TypeStat, workers)
+	for i, w := range workerState {
+		types[i] = w.types
+		for _, a := range w.adjust {
+			a.node.OwnSize += a.size
+			a.node.OwnAllocated += a.alloc
+			s.allocated.Add(a.alloc)
+		}
+	}
+	slices.Sort(s.denied)
 
 	res.Finished = time.Now()
 	for _, root := range res.Roots {
@@ -163,9 +178,15 @@ func Run(ctx context.Context, l fsx.Lister, opts Options) (*Result, error) {
 
 // job is a folder waiting to be listed.
 type job struct {
-	node *Node
-	path string
-	seen *idSet
+	node  *Node
+	path  string
+	links *linkSet
+}
+
+// worker is what one worker goroutine keeps to itself during a scan.
+type worker struct {
+	types  map[string]*TypeStat
+	adjust []adjust
 }
 
 type state struct {
@@ -184,7 +205,7 @@ type state struct {
 
 // process lists one folder: it adds up its files and queues its sub-folders.
 // Only this call writes to j.node, so no locking is needed for it.
-func (s *state) process(j job, types map[string]*TypeStat) {
+func (s *state) process(j job, w *worker) {
 	s.current.Store(&j.path)
 	entries, err := s.lister.List(j.path)
 	s.folders.Add(1)
@@ -209,13 +230,16 @@ func (s *state) process(j job, types map[string]*TypeStat) {
 				child.Link = true // a junction, symlink or mount point: never followed
 				continue
 			}
-			s.q.push(job{node: child, path: join(j.path, e.Name), seen: j.seen})
+			s.q.push(job{node: child, path: join(j.path, e.Name), links: j.links})
 			continue
 		}
 		size, alloc := e.Size, e.Allocated
-		if e.FileID != 0 && alloc > 0 && !j.seen.addFirst(e.FileID) {
-			s.shared.Add(alloc) // another name for a file already counted
-			size, alloc = 0, 0
+		if e.FileID != 0 && alloc > 0 {
+			var dup bool
+			size, alloc, dup = j.links.claim(e.FileID, n, j.path, size, alloc, &w.adjust)
+			if dup {
+				s.shared.Add(max(e.Allocated, alloc)) // another name for a file counted once
+			}
 		}
 		if e.IsCloudOnly() {
 			s.cloudOnly.Add(1)
@@ -228,7 +252,7 @@ func (s *state) process(j job, types map[string]*TypeStat) {
 		}
 		s.files.Add(1)
 		s.allocated.Add(alloc)
-		addType(types, e.Name, size, alloc)
+		addType(w.types, e.Name, size, alloc)
 		s.top.offer(j.path, e, size, alloc)
 	}
 }
@@ -284,6 +308,27 @@ func total(n *Node) {
 		}
 		return strings.Compare(a.Name, b.Name)
 	})
+}
+
+// pathLess orders paths ignoring ASCII case, as Explorer orders names, with
+// exact byte order breaking ties.
+func pathLess(a, b string) bool {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if ca, cb := lowerASCII(a[i]), lowerASCII(b[i]); ca != cb {
+			return ca < cb
+		}
+	}
+	if len(a) != len(b) {
+		return len(a) < len(b)
+	}
+	return a < b
+}
+
+func lowerASCII(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 func join(dir, name string) string {
@@ -343,28 +388,62 @@ func (q *queue) close() {
 	q.cond.Broadcast()
 }
 
-// idSet remembers file IDs, to count hard-linked files once. It is split in
-// shards so that parallel workers rarely wait for each other.
-type idSet struct {
+// linkSet decides which folder counts a file that has several names (hard
+// links), so that every file counts once. To get the same result from every
+// scan, whatever order the parallel workers meet the names in, the name whose
+// folder path sorts first counts the file. That credits Windows' shared files
+// to System32 rather than WinSxS. The set is split in shards so that workers
+// rarely wait for each other.
+type linkSet struct {
 	shards [64]struct {
 		sync.Mutex
-		ids map[uint64]struct{}
+		owners map[uint64]linkOwner
 	}
 }
 
-// addFirst records id and reports whether it was new.
-func (s *idSet) addFirst(id uint64) bool {
+// linkOwner is the name that currently counts a file.
+type linkOwner struct {
+	node        *Node
+	dir         string // the folder path of that name
+	size, alloc int64  // what it counts
+}
+
+// adjust changes a folder's own totals after the walk.
+type adjust struct {
+	node        *Node
+	size, alloc int64
+}
+
+// claim is called for every file with a known ID, seen in the folder dir
+// (node n). It returns what n should count for the file now, and whether the
+// file was seen before under another name. Changes to folders that other
+// workers may be listing are added to adj and applied after the walk.
+// Directory entries of hard links can be out of date, so the file counts with
+// the largest size any of its names reports.
+func (s *linkSet) claim(id uint64, n *Node, dir string, size, alloc int64, adj *[]adjust) (int64, int64, bool) {
 	sh := &s.shards[id%uint64(len(s.shards))]
 	sh.Lock()
 	defer sh.Unlock()
-	if _, ok := sh.ids[id]; ok {
-		return false
+	o, seen := sh.owners[id]
+	if !seen {
+		if sh.owners == nil {
+			sh.owners = make(map[uint64]linkOwner)
+		}
+		sh.owners[id] = linkOwner{node: n, dir: dir, size: size, alloc: alloc}
+		return size, alloc, false
 	}
-	if sh.ids == nil {
-		sh.ids = make(map[uint64]struct{})
+	size, alloc = max(size, o.size), max(alloc, o.alloc)
+	if pathLess(dir, o.dir) {
+		// This name sorts first: it takes over the file.
+		*adj = append(*adj, adjust{node: o.node, size: -o.size, alloc: -o.alloc})
+		sh.owners[id] = linkOwner{node: n, dir: dir, size: size, alloc: alloc}
+		return size, alloc, true
 	}
-	sh.ids[id] = struct{}{}
-	return true
+	if size != o.size || alloc != o.alloc {
+		*adj = append(*adj, adjust{node: o.node, size: size - o.size, alloc: alloc - o.alloc})
+		sh.owners[id] = linkOwner{node: o.node, dir: o.dir, size: size, alloc: alloc}
+	}
+	return 0, 0, true
 }
 
 // topFiles keeps the n largest files. Files smaller than the smallest kept
@@ -380,7 +459,7 @@ func (t *topFiles) offer(dir string, e fsx.Entry, size, alloc int64) {
 	if alloc <= t.floor.Load() {
 		return
 	}
-	f := File{Path: join(dir, e.Name), Size: size, Allocated: alloc, Modified: e.Modified}
+	f := File{Path: join(dir, e.Name), Size: size, Allocated: alloc, Modified: e.Modified, FileID: e.FileID}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch {
@@ -397,6 +476,8 @@ func (t *topFiles) offer(dir string, e fsx.Entry, size, alloc int64) {
 	}
 }
 
+// sorted returns the kept files, largest first. A hard-linked file can have
+// been kept under two names; only the name that sorts first stays.
 func (t *topFiles) sorted() []File {
 	files := slices.Clone(t.h)
 	slices.SortFunc(files, func(a, b File) int {
@@ -408,7 +489,15 @@ func (t *topFiles) sorted() []File {
 		}
 		return strings.Compare(a.Path, b.Path)
 	})
-	return files
+	first := make(map[uint64]string)
+	for _, f := range files {
+		if p, ok := first[f.FileID]; f.FileID != 0 && (!ok || pathLess(f.Path, p)) {
+			first[f.FileID] = f.Path
+		}
+	}
+	return slices.DeleteFunc(files, func(f File) bool {
+		return f.FileID != 0 && first[f.FileID] != f.Path
+	})
 }
 
 // fileHeap is a min-heap by size on disk.

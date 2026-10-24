@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -97,6 +98,66 @@ func TestHardLinksCountOnce(t *testing.T) {
 	res := run(t, f, scan.Options{Roots: []string{`C:\`}})
 	if res.Allocated != 1<<20 || res.Shared != 1<<20 || res.Files != 2 {
 		t.Errorf("allocated %d shared %d files %d; want 1 MiB once, 1 MiB shared, 2 names", res.Allocated, res.Shared, res.Files)
+	}
+}
+
+// shuffledLister delays each listing by an amount that depends on the folder
+// and a seed, so the workers meet folders in a different order per seed.
+type shuffledLister struct {
+	fsx.Lister
+	seed int
+}
+
+func (s shuffledLister) List(dir string) ([]fsx.Entry, error) {
+	h := s.seed
+	for _, c := range dir {
+		h = h*31 + int(c)
+	}
+	time.Sleep(time.Duration(h&3) * time.Millisecond)
+	return s.Lister.List(dir)
+}
+
+func TestHardLinksCountWhereThePathSortsFirst(t *testing.T) {
+	f := memfs.New()
+	f.AddFile(`C:\Windows\WinSxS\amd64_x\big.dll`, 1<<20, t0)
+	f.AddHardLink(`C:\Windows\System32\big.dll`, `C:\Windows\WinSxS\amd64_x\big.dll`)
+	f.AddHardLink(`C:\Windows\SysWOW64\big.dll`, `C:\Windows\WinSxS\amd64_x\big.dll`)
+	for seed := range 30 {
+		res := run(t, shuffledLister{f, seed}, scan.Options{Roots: []string{`C:\`}, Workers: 1 + seed%8})
+		sys32, wow, sxs := res.Find(`C:\Windows\System32`), res.Find(`C:\Windows\SysWOW64`), res.Find(`C:\Windows\WinSxS`)
+		if sys32.Allocated != 1<<20 || wow.Allocated != 0 || sxs.Allocated != 0 {
+			t.Fatalf("seed %d: System32 %d, SysWOW64 %d, WinSxS %d; want everything in System32",
+				seed, sys32.Allocated, wow.Allocated, sxs.Allocated)
+		}
+		if res.Allocated != 1<<20 || res.Shared != 2<<20 {
+			t.Fatalf("seed %d: allocated %d shared %d", seed, res.Allocated, res.Shared)
+		}
+		if len(res.Largest) != 1 || res.Largest[0].Path != `C:\Windows\System32\big.dll` {
+			t.Fatalf("seed %d: largest = %+v; want the file once, under System32", seed, res.Largest)
+		}
+	}
+}
+
+func TestHardLinkWithAnOutdatedEntryCountsTheLargerSize(t *testing.T) {
+	f := memfs.New()
+	f.Add(`C:\a\file.bin`, fsx.Entry{Size: 4096, Allocated: 4096, FileID: 7})
+	f.Add(`C:\b\file.bin`, fsx.Entry{Size: 8192, Allocated: 8192, FileID: 7})
+	for seed := range 10 {
+		res := run(t, shuffledLister{f, seed}, scan.Options{Roots: []string{`C:\`}, Workers: 2})
+		if a, b := res.Find(`C:\a`), res.Find(`C:\b`); a.Allocated != 8192 || b.Allocated != 0 || res.Allocated != 8192 {
+			t.Fatalf("seed %d: a %d, b %d, total %d; want 8192 once, in a", seed, a.Allocated, b.Allocated, res.Allocated)
+		}
+	}
+}
+
+func TestDeniedFoldersAreSorted(t *testing.T) {
+	f := memfs.New()
+	for _, d := range []string{`C:\z`, `C:\a`, `C:\m`} {
+		f.Deny(d)
+	}
+	res := run(t, f, scan.Options{Roots: []string{`C:\`}})
+	if !slices.Equal(res.Denied, []string{`C:\a`, `C:\m`, `C:\z`}) {
+		t.Errorf("denied = %v; want sorted", res.Denied)
 	}
 }
 
