@@ -13,10 +13,15 @@ Run only the read-only smoke tests against the real system.
 
 .PARAMETER Elevated
 With -Smoke: also run the smoke tests that need Administrator rights.
+
+.PARAMETER UI
+After the Go tests, build the exe and run the browser tests in e2e\ against
+coptimizer -demo. Needs Node.js and an installed Chrome.
 #>
 param(
     [switch]$Smoke,
-    [switch]$Elevated
+    [switch]$Elevated,
+    [switch]$UI
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,6 +67,23 @@ try {
             go test -count=1 ./...
         }
         $code = $LASTEXITCODE
+    }
+    if ($code -eq 0 -and $UI) {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build.ps1')
+        $code = $LASTEXITCODE
+    }
+    if ($code -eq 0 -and $UI) {
+        Push-Location (Join-Path $repo 'e2e')
+        try {
+            if (-not (Test-Path 'node_modules')) {
+                # Keep npm's download cache inside the repo too.
+                npm ci --no-audit --no-fund --cache (Join-Path $tmp 'npm-cache')
+            }
+            if ($LASTEXITCODE -eq 0) { node --test }
+            $code = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
     }
 } finally {
     Pop-Location

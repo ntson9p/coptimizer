@@ -1,6 +1,6 @@
 # COptimizer: implementation plan
 
-Status: phase 0 done (project setup and the test safety fuses); phase 1 next. Companion documents: [space-hogs.md](space-hogs.md) (what the app looks for) and [testing.md](testing.md) (how it's tested without risking anyone's PC).
+Status: phases 0 and 1 done (test safety fuses; read-only scanner, server, launcher and web page); phase 2 (findings) next. Companion documents: [space-hogs.md](space-hogs.md) (what the app looks for) and [testing.md](testing.md) (how it's tested without risking anyone's PC).
 
 ## 1. Goal
 
@@ -68,7 +68,7 @@ coptimizer.exe --serve (elevated): the "server"; its console window stays open
 
 Started from an elevated terminal (no launcher), the server prints the link and tries `explorer.exe <url>`, which hands the URL to the user's unelevated shell.
 
-The launcher passes its own user SID. If the elevated account is a different one (a standard user typed an administrator's password), per-user tool actions (`npm`, `wsl`, `docker`) are disabled with an explanation, because they would run against the wrong account.
+From phase 3, when per-user tool actions arrive, the launcher also passes its own user SID. If the elevated account is a different one (a standard user typed an administrator's password), per-user tool actions (`npm`, `wsl`, `docker`) are disabled with an explanation, because they would run against the wrong account.
 
 ### 3.2 Components
 
@@ -270,7 +270,7 @@ afterwards: the affected folder is re-scanned and its finding updated
 | `POST /api/session` | Exchange the one-time launch code for a session token |
 | `GET /api/status` | Version, elevation, signed-in user, simulation mode, busy state |
 | `GET /api/drives` | Drives with size, used and free space |
-| `POST /api/scans` | Start a scan `{mode: quick \| full \| folder, drive, path?}` |
+| `POST /api/scans` | Start a full scan of whole drives `{drives: ["C:\\"]}`; quick and folder scans come with phase 2 |
 | `GET /api/scans/{id}` | Scan state, progress, summary |
 | `DELETE /api/scans/{id}` | Cancel a scan |
 | `GET /api/scans/{id}/tree?path=…` | Children of a folder with sizes (lazy tree) |
@@ -290,7 +290,7 @@ afterwards: the affected folder is re-scanned and its finding updated
 
 Errors look like `{"error": {"code": "plan_expired", "message": "…"}}`, with status 400, 401, 403, 404, 409 (busy or stale plan), 421 (wrong Host) or 500.
 
-Events: `hello`, `heartbeat` (every 15 s), `scan.progress`, `scan.finished`, `findings.updated`, `job.queued`, `job.started`, `job.progress`, `job.log`, `job.finished`, `drives.updated`. Each carries an ID; after a reconnect the client sends `Last-Event-ID` and the server replays from a 1,000-event buffer.
+Events: `hello`, `heartbeat` (every 15 s), `scan.started`, `scan.progress` (not kept for replay), `scan.finished`, `findings.updated`, `job.queued`, `job.started`, `job.progress`, `job.log`, `job.finished`, `drives.updated`. Each carries an ID; after a reconnect the client sends `Last-Event-ID` and the server replays from a 1,000-event buffer.
 
 ## 10. Web client
 
@@ -310,7 +310,7 @@ Files: `web/index.html`, `web/css/app.css`, and `web/js/` with `main.js`, `api.j
 
 `<exe folder>\data\` holds `config.json`, `history.jsonl` (append-only audit log), `scans\*.json.gz` and `logs\coptimizer-YYYYMMDD.log` (7 days kept). If the exe folder isn't writable, it falls back to `%LOCALAPPDATA%\COptimizer`.
 
-Flags: `--serve`, `--port`, `--launch-code`, `--user-sid`, `--no-browser`, `--demo`, `--simulate`, `--data-dir`, `--log-level`.
+Flags today: `-serve`, `-demo`, `-port`, `-launch-code`, `-instance`, `-no-browser`, `-version`. Planned: `-simulate`, `-data-dir`, `-log-level`, `-user-sid`.
 
 **Demo mode** (`--demo`) wires the in-memory filesystem, the fake system and the fake command runner, loaded with a synthetic machine modelled on the manual scan in space-hogs.md (section 5). It needs no admin rights and touches nothing real. It's used for UI work, UI tests and screenshots.
 
@@ -348,7 +348,7 @@ Each phase ends with its tests passing, its manual checks done and a short demo.
 | Phase | Builds | Done when |
 |---|---|---|
 | 0. Scaffold ✅ | Layout, `go.mod`, scripts, `.gitignore`, README, MIT `LICENSE`, `SECURITY.md`, CI workflow. **First**, so every later test is protected from day one: the `safety` fuses, the `sandbox` test helpers, `testguard` and the forbidden-API test | `scripts\test.ps1` runs green and refuses to run elevated; planted violations and a weakened fuse make the tests fail (met 24 Oct 2026) |
-| 1. Read-only core | `winfs` enumerator, scanner, drives probe, server (auth, Host and Origin checks, events), launcher and elevation, UI Overview + Explorer + progress, demo mode | A full scan of C: works; folder totals match Explorer within ~1%; ~1M files take under 2 minutes; the codebase has no code yet that deletes files or changes settings |
+| 1. Read-only core ✅ | `winfs` enumerator, scanner, drives probe, server (auth, Host and Origin checks, events), launcher and elevation, UI Overview + Explorer + progress, demo mode, browser tests | A full scan of C: works; folder totals match Explorer within ~1%; ~1M files take under 2 minutes; the codebase has no code yet that deletes files or changes settings. Measured 24 Oct 2026 on a 120 GB budget SATA SSD, without admin rights: 730k files and 185k folders in 104 s cold and 20 s warm; `Program Files` within 0.006% of PowerShell's count, same number of files. The elevated launch (UAC) still needs its first manual run |
 | 2. Findings | Rule engine, per-user expansion, probes (power, restore points, Recycle Bin, WSL, Docker, DISM on demand, reserved storage), detection for every category in space-hogs.md, unrecognized folders, snapshots and growth, Findings UI | On the author's PC the app finds, automatically, everything the manual scan in space-hogs.md (section 5) found |
 | 3. Safe actions | Safety policy, deleter (dry run and real), command runner, plans, jobs and history, Activity UI. Safe-tier actions: temp folders, Recycle Bin, package-manager caches, browser and Electron caches, shader caches, crash dumps and error reports, Delivery Optimization, Windows Update cleanup via Disk Cleanup, DISM StartComponentCleanup | Every action is covered by fake and sandbox tests; at least 5 have run for real on the author's PC, preview first, with measured results matching the estimate |
 | 4. Moderate actions | Hibernation (reduced, off, on), restore points (keep newest, cap size), upgrade leftovers (`$GetCurrent`, `$Windows.~BT`, `$Windows.~WS`, `Windows.old` via Disk Cleanup), DISM `/ResetBase`, Compact OS, WSL sparse / compact / move, Docker prune (never volumes by default). Acknowledgement dialogs with undo steps | Dry runs checked on a real PC; real runs only on a disposable VM or CI runner, or deliberately by the person at the PC |

@@ -63,6 +63,18 @@ func (b *Box) Mkdir(rel string) string {
 	return p
 }
 
+// HardLink adds a second name rel for the existing file target, both inside
+// the box, and returns the new name's path.
+func (b *Box) HardLink(rel, target string) string {
+	b.t.Helper()
+	link, existing := b.Path(rel), b.Path(target)
+	safety.GuardWrite(link)
+	if err := os.Link(existing, link); err != nil {
+		b.t.Fatal(err)
+	}
+	return link
+}
+
 // Junction creates a directory junction at rel pointing to target and
 // returns its path. The target may be anywhere: tests use junctions to prove
 // that nothing follows links out of a folder.

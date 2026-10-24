@@ -20,8 +20,17 @@ var allowed = map[string][]string{
 	"internal/safety/realpath_windows.go": {"golang.org/x/sys/windows"},
 	// Asks whether the process token is elevated.
 	"internal/testguard/testguard.go": {"golang.org/x/sys/windows"},
+	// Lists folders, read-only (FILE_LIST_DIRECTORY); never opens files.
+	"internal/winfs/list_windows.go": {"golang.org/x/sys/windows"},
+	// Enables SeBackupPrivilege (read access) in this process only.
+	"internal/winfs/privilege_windows.go": {"golang.org/x/sys/windows"},
+	// Reads drive sizes and the process token.
+	"internal/sysinfo/sysinfo_windows.go": {"golang.org/x/sys/windows"},
+	// Starts the elevated server and opens the browser; guarded by
+	// safety.GuardShellOpen.
+	"cmd/coptimizer/shell_windows.go": {"golang.org/x/sys/windows"},
 	// Test helpers; every change is checked by safety.GuardWrite or GuardDelete first.
-	"internal/sandbox/sandbox.go":          {"os.MkdirAll", "os.WriteFile"},
+	"internal/sandbox/sandbox.go":          {"os.Link", "os.MkdirAll", "os.WriteFile"},
 	"internal/sandbox/junction_windows.go": {"golang.org/x/sys/windows", "os.Mkdir", "os.Remove"},
 }
 

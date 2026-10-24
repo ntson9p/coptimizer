@@ -130,12 +130,13 @@ They receive only `sysinfo.Reader`. The mutator is never constructed, and its re
 ## 7. How to run
 
 ```powershell
-scripts\test.ps1                    # L1–L4; refuses to run as Administrator
+scripts\test.ps1                    # L1–L4 (API); refuses to run as Administrator
+scripts\test.ps1 -UI                # also the browser tests in e2e\ against coptimizer -demo
 scripts\test.ps1 -Smoke             # L5 only: read-only checks against the real system
 scripts\test.ps1 -Smoke -Elevated   # L5 including the checks that need Administrator
 ```
 
-Playwright UI tests against `--demo` get their own switch in phase 1.
+The browser tests use Node.js, `playwright-core` (no browser download) and the installed Chrome (`COPTIMIZER_E2E_CHANNEL` picks another). They save screenshots in `.tmp\e2e`.
 
 `test.ps1` points `TMP`, `TEMP` and `GOTMPDIR` at `<repo>\.tmp`, so test sandboxes never land in the system temp folder. It checks formatting with `gofmt`, then runs `go vet ./...` and `go test ./...`.
 

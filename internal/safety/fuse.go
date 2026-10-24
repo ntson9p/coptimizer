@@ -133,6 +133,15 @@ func GuardRun(program string) {
 	trip("run", program, "only registered test programs may run in tests")
 }
 
+// GuardShellOpen must be called before asking the Windows shell to open
+// something: a program, a link in the browser, an Explorer window. Tests never
+// do that, so in tests it always panics.
+func GuardShellOpen(target string) {
+	if armed {
+		trip("open", target, "tests may never start anything through the Windows shell")
+	}
+}
+
 // GuardSystemChange must be called before changing any system setting: the
 // registry, power options, restore points, services, the Recycle Bin. Tests
 // must never do that, so in tests it always panics.

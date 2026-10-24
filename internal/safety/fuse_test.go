@@ -107,6 +107,11 @@ func TestGuardSystemChangeAlwaysTrips(t *testing.T) {
 	mustTrip(t, "system change", func() { safety.GuardSystemChange("the Recycle Bin") })
 }
 
+func TestGuardShellOpenAlwaysTrips(t *testing.T) {
+	mustTrip(t, "open a link", func() { safety.GuardShellOpen("http://127.0.0.1:1/") })
+	mustTrip(t, "start a program", func() { safety.GuardShellOpen(`C:\Windows\explorer.exe`) })
+}
+
 func TestRegisterSandboxRejectsBadFolders(t *testing.T) {
 	mustTrip(t, "relative folder", func() { safety.RegisterSandbox(`relative\dir`) })
 	mustTrip(t, "missing folder", func() { safety.RegisterSandbox(`C:\coptimizer-does-not-exist`) })

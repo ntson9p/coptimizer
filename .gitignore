@@ -7,7 +7,7 @@
 # Test sandboxes (scripts\test.ps1 points TMP here)
 /.tmp/
 
-# Optional UI tests
+# UI tests' dependencies (package-lock.json is committed)
 /e2e/node_modules/
 
 # Go tooling output
