@@ -1,0 +1,15 @@
+# Built program
+/dist/
+
+# The app's own data when run from the repo (config, history, scans, logs)
+/data/
+
+# Test sandboxes (scripts\test.ps1 points TMP here)
+/.tmp/
+
+# Optional UI tests
+/e2e/node_modules/
+
+# Go tooling output
+*.test.exe
+coverage.out

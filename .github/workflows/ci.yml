@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # GitHub-hosted runners are fresh VMs thrown away after each run; the tests
+    # allow Administrator rights only there.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test
+        shell: pwsh
+        run: ./scripts/test.ps1
+      - name: Build
+        shell: pwsh
+        run: ./scripts/build.ps1
